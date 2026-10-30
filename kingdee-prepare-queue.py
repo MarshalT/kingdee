@@ -75,7 +75,7 @@ def load_header_map(header_row):
         raise SystemExit("表头缺少「订单号」列")
     code_i = idx["订单号"] + 1
     idx["_商品编码"] = code_i
-    need = ["日期", "订单号", "名称", "数量", "单位", "单价（供应商）", "供应商名称"]
+    need = ["日期", "订单号", "名称", "数量", "单位", "单价（供应商）", "供应商名称", "供应商结算价格"]
     miss = [n for n in need if n not in idx]
     if miss:
         raise SystemExit(f"表头缺少列: {', '.join(miss)}")
@@ -102,6 +102,7 @@ def read_excel(path: Path):
         qty = _num(row[idx["数量"]])
         unit = _cell(row[idx["单位"]]) or ""
         price = _num(row[idx["单价（供应商）"]])
+        settlement_price = _num(row[idx["供应商结算价格"]])
         d = _cell(row[idx["日期"]])
         if qty is None or price is None:
             continue
@@ -120,6 +121,7 @@ def read_excel(path: Path):
                 "qty": qty,
                 "unit": str(unit),
                 "price": price,
+                "settlementPrice": settlement_price,
             }
         )
     wb.close()
@@ -139,12 +141,15 @@ def split_orders(rows):
                     "orderNo": r["orderNo"],
                     "supplier": r["supplier"],
                     "date": r["date"],
+                    "settlementPrice": r["settlementPrice"],
                     "lines": [],
                 }
             )
         g = groups[key_to_i[key]]
         if not g["date"] and r["date"]:
             g["date"] = r["date"]
+        if g["settlementPrice"] is None and r["settlementPrice"] is not None:
+            g["settlementPrice"] = r["settlementPrice"]
         g["lines"].append(
             {
                 "code": r["code"],
@@ -153,11 +158,13 @@ def split_orders(rows):
                 "qty": r["qty"],
                 "unit": r["unit"],
                 "price": r["price"],
+                "settlementPrice": r["settlementPrice"],
             }
         )
     for g in groups:
         total = sum(l["qty"] * l["price"] for l in g["lines"])
         g["expectedTotal"] = round(total + 1e-9, 2)
+        g["settlementTotal"] = round(sum(l["qty"] * (l["settlementPrice"] or 0) for l in g["lines"]) + 1e-9, 2)
     return groups
 
 
@@ -234,12 +241,12 @@ def write_clip_pages(orders, out_dir: Path, index_base: int = 0):
         next_url = orders[i + 1].get("combinedUrl") if i + 1 < len(orders) else None
         paste_body = "\n".join(f"{format(l['qty'], '.15g')}\t{l['unit']}\t{format(l['price'], '.15g')}" for l in o["lines"])
         codes_body = "\n".join(l["code"] or "" for l in o["lines"])
-        (out_dir / o["combinedName"]).write_text(html_combined_page(f"{o['orderNo']} · {o['supplier']}", paste_body, codes_body, next_url), encoding="utf-8")
+        (out_dir / o["combinedName"]).write_text(html_combined_page(f"{o['orderNo']} · {o['supplier']} · 预期 {o['expectedTotal']} · 供应商结算价格 {o.get('settlementPrice') if o.get('settlementPrice') is not None else '—'}", paste_body, codes_body, next_url), encoding="utf-8")
     # 索引页方便人工点选
     links = ["<!DOCTYPE html><meta charset=utf-8><title>clipserve index</title><h1>录单复制页</h1><ol>"]
     for o in orders:
         links.append(
-            f"<li><b>{o['orderNo']}</b> · {o['supplier']} · 预期 {o['expectedTotal']} · "
+            f"<li><b>{o['orderNo']}</b> · {o['supplier']} · 预期 {o['expectedTotal']} · 供应商结算价格 {o.get('settlementPrice') if o.get('settlementPrice') is not None else '—'} · "
             f"<a href='paste-{o['orderNo']}-{o['clipIndex']}.html'>价量</a> · "
             f"<a href='codes-{o['orderNo']}-{o['clipIndex']}.html'>编码</a> · "
             f"<a href='order-{o['orderNo']}-{o['clipIndex']}.html'>合并操作页</a></li>"

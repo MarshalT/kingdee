@@ -460,6 +460,10 @@
                 <div class="final-section" id="section-order-source">
                     <div class="final-label"><span>📂</span><span>本地订单队列</span></div>
                     <div id="source-order-status" class="final-hint">正在读取本地订单队列…</div>
+                    <div class="final-buttons" style="margin-top:6px; grid-template-columns: 1fr auto; align-items:center;">
+                        <div id="source-order-meta" class="final-hint"></div>
+                        <button class="final-btn btn-paste" id="btn-copy-supplier" type="button">复制供应商名称</button>
+                    </div>
                     <div class="final-buttons" style="margin-top:8px; grid-template-columns: 1fr 1fr 1fr;">
                         <button class="final-btn btn-paste" id="btn-load-orders" type="button">读取队列</button>
                         <button class="final-btn btn-refresh" id="btn-prev-order" type="button" disabled>上一单</button>
@@ -860,11 +864,13 @@
     function loadSourceOrder(index) {
         if (index < 0 || index >= sourceOrders.length) return;
         const order = sourceOrders[index]; const lines = Array.isArray(order.lines) ? order.lines : [];
+        document.getElementById('input-date').value = order.date || savedDate; savedDate = order.date || savedDate;
+        document.getElementById('source-order-meta').textContent = `供应商：${order.supplier || '—'} · 供应商结算价格：${order.settlementPrice ?? '—'}`;
         document.getElementById('input-codes').value = lines.map(line => line.code || '').join('\n');
         document.getElementById('input-qty').value = lines.map(line => line.qty ?? '').join('\n');
         document.getElementById('input-price').value = lines.map(line => line.price ?? '').join('\n');
         sourceOrderIndex = index; updateExpectedTotalUI();
-        updateSourceOrderStatus(`第 ${index + 1}/${sourceOrders.length} 单：${order.orderNo} · ${order.supplier} · 预期 ${order.expectedTotal ?? '—'}`);
+        updateSourceOrderStatus(`第 ${index + 1}/${sourceOrders.length} 单：${order.orderNo} · ${order.supplier} · 预期 ${order.expectedTotal ?? '—'} · 供应商结算价格 ${order.settlementPrice ?? '—'}`);
         log(`已载入队列第 ${index + 1} 单：${order.orderNo} / ${order.supplier}（${lines.length} 行）`, 'success');
     }
     function requestSourceOrders() {
@@ -2636,6 +2642,7 @@
 
     document.getElementById('btn-fill').addEventListener('click', smartFillData);
     document.getElementById('btn-load-orders').addEventListener('click', requestSourceOrders);
+    document.getElementById('btn-copy-supplier').addEventListener('click', () => { const name = sourceOrders[sourceOrderIndex]?.supplier; if (name) GM_setClipboard(name); });
     document.getElementById('btn-prev-order').addEventListener('click', () => loadSourceOrder(sourceOrderIndex - 1));
     document.getElementById('btn-next-order').addEventListener('click', () => loadSourceOrder(sourceOrderIndex + 1));
     document.getElementById('btn-repair-cells').addEventListener('click', runRepairCellsOnly);
