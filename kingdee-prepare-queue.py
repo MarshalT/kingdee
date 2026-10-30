@@ -259,7 +259,11 @@ def write_clip_pages(orders, out_dir: Path, index_base: int = 0):
         codes_body = "\n".join(l["code"] or "" for l in o["lines"])
         (out_dir / o["combinedName"]).write_text(html_combined_page(f"{o['orderNo']} · {o['supplier']} · 预期 {o['expectedTotal']} · 供应商结算价格 {o.get('settlementPrice') if o.get('settlementPrice') is not None else '—'}", paste_body, codes_body, next_url), encoding="utf-8")
     # 索引页方便人工点选
-    links = ["<!DOCTYPE html><meta charset=utf-8><title>clipserve index</title><h1>录单复制页</h1><ol>"]
+    links = [
+        "<!DOCTYPE html><meta charset=utf-8><title>clipserve index</title>",
+        "<style>body{font-family:Arial,sans-serif;margin:24px} .page-title{display:flex;align-items:center;gap:24px} .page-title h1{margin:0} .audit-link{font-size:20px;padding:10px 16px;border:1px solid #1677ff;border-radius:8px;background:#eef6ff;text-decoration:none} li{margin:8px 0}</style>",
+        "<div class='page-title'><h1>录单复制页</h1><a class='audit-link' href='price-differences.html'>价格差异清单</a></div><ol>",
+    ]
     for o in orders:
         links.append(
             f"<li><b>{o['orderNo']}</b> · {o['supplier']} · 预期 {o['expectedTotal']} · 供应商结算价格 {o.get('settlementPrice') if o.get('settlementPrice') is not None else '—'} · "
@@ -269,6 +273,43 @@ def write_clip_pages(orders, out_dir: Path, index_base: int = 0):
         )
     links.append("</ol>")
     (out_dir / "index.html").write_text("\n".join(links), encoding="utf-8")
+
+    # 差异按币种精度（分）判断，页面同时列出实际差额。
+    audit = [
+        "<!DOCTYPE html><html><head><meta charset='utf-8'><title>价格差异清单</title>",
+        "<style>body{font-family:Arial,sans-serif;margin:24px;color:#222}a{color:#1677ff}h1{margin-bottom:8px}.hint{color:#666;margin:0 0 20px}table{border-collapse:collapse;width:100%;margin:16px 0 28px}th,td{border:1px solid #ddd;padding:9px 12px;text-align:left}th{background:#f4f6f8}td.num{text-align:right;font-variant-numeric:tabular-nums}.diff{color:#c62828;font-weight:bold}.empty{padding:12px;color:#388e3c;background:#f1f8e9}</style></head><body>",
+        "<p><a href='index.html'>← 返回录单复制页</a></p><h1>价格差异清单</h1><p class='hint'>按金额保留两位小数比较；差额 = 表格价格 − 预期。</p>",
+    ]
+
+    def add_audit_table(title, expected_key, actual_key, expected_label, actual_label):
+        mismatches = []
+        for order in orders:
+            expected = order.get(expected_key)
+            actual = order.get(actual_key)
+            if expected is None or actual is None:
+                continue
+            expected_cents = round(float(expected) * 100)
+            actual_cents = round(float(actual) * 100)
+            if expected_cents != actual_cents:
+                mismatches.append((order, expected_cents, actual_cents))
+        audit.append(f"<h2>{title}（{len(mismatches)} 单）</h2>")
+        if not mismatches:
+            audit.append("<div class='empty'>没有发现价格差异。</div>")
+            return
+        audit.append(f"<table><thead><tr><th>订单号</th><th>供应商</th><th>{expected_label}</th><th>{actual_label}</th><th>差额（表格价格 − 预期）</th></tr></thead><tbody>")
+        for order, expected_cents, actual_cents in mismatches:
+            diff_cents = actual_cents - expected_cents
+            audit.append(
+                f"<tr><td>{order['orderNo']}</td><td>{order['supplier']}</td>"
+                f"<td class='num'>{expected_cents / 100:.2f}</td><td class='num'>{actual_cents / 100:.2f}</td>"
+                f"<td class='num diff'>{diff_cents / 100:+.2f}</td></tr>"
+            )
+        audit.append("</tbody></table>")
+
+    add_audit_table("采购订单", "expectedTotal", "settlementPrice", "预期", "供应商结算价格")
+    add_audit_table("销售订单", "salesLineTotal", "salesTotal", "总价（精实）合计", "精实价格总计")
+    audit.append("</body></html>")
+    (out_dir / "price-differences.html").write_text("\n".join(audit), encoding="utf-8")
     return written
 
 
