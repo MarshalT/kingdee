@@ -9,6 +9,8 @@
 // @match        https://*.jiandaoyun.com/*
 // @grant        GM_setClipboard
 // @grant        GM_getValue
+// @grant        GM_xmlhttpRequest
+// @connect      127.0.0.1
 // @grant        GM_setValue
 // @grant        unsafeWindow
 // @run-at       document-end
@@ -47,6 +49,8 @@
     };
 
     let isFilling = false;
+    let sourceOrders = [];
+    let sourceOrderIndex = -1;
     let gridApi = null;
     let orderType = 'purchase'; // 'purchase' 或 'sales'
     let savedDate = getTodayDate(); // 保存的日期
@@ -453,6 +457,17 @@
                     <div class="final-hint">💡 销售订单模式会自动将这里的客户写入页面中的客户输入框</div>
                 </div>
 
+                <div class="final-section" id="section-order-source">
+                    <div class="final-label"><span>📂</span><span>本地订单队列</span></div>
+                    <div id="source-order-status" class="final-hint">正在读取本地订单队列…</div>
+                    <div class="final-buttons" style="margin-top:8px; grid-template-columns: 1fr 1fr 1fr;">
+                        <button class="final-btn btn-paste" id="btn-load-orders" type="button">读取队列</button>
+                        <button class="final-btn btn-refresh" id="btn-prev-order" type="button" disabled>上一单</button>
+                        <button class="final-btn btn-refresh" id="btn-next-order" type="button" disabled>下一单</button>
+                    </div>
+                    <div class="final-hint">💡 切换只载入编码、数量和单价，不会自动填充金蝶页面</div>
+                </div>
+
                 <div class="final-section" id="section-codes">
                     <div class="final-label">
                         <span>🏷️</span>
@@ -833,6 +848,32 @@
             ok ? 'success' : 'error'
         );
         return ok;
+    }
+
+    const ORDER_QUEUE_URL = 'http://127.0.0.1:8766/api/orders';
+    function updateSourceOrderStatus(message) {
+        const el = document.getElementById('source-order-status'); if (el) el.textContent = message;
+        const prev = document.getElementById('btn-prev-order'); const next = document.getElementById('btn-next-order');
+        if (prev) prev.disabled = sourceOrderIndex <= 0;
+        if (next) next.disabled = sourceOrderIndex < 0 || sourceOrderIndex >= sourceOrders.length - 1;
+    }
+    function loadSourceOrder(index) {
+        if (index < 0 || index >= sourceOrders.length) return;
+        const order = sourceOrders[index]; const lines = Array.isArray(order.lines) ? order.lines : [];
+        document.getElementById('input-codes').value = lines.map(line => line.code || '').join('\n');
+        document.getElementById('input-qty').value = lines.map(line => line.qty ?? '').join('\n');
+        document.getElementById('input-price').value = lines.map(line => line.price ?? '').join('\n');
+        sourceOrderIndex = index; updateExpectedTotalUI();
+        updateSourceOrderStatus(`第 ${index + 1}/${sourceOrders.length} 单：${order.orderNo} · ${order.supplier} · 预期 ${order.expectedTotal ?? '—'}`);
+        log(`已载入队列第 ${index + 1} 单：${order.orderNo} / ${order.supplier}（${lines.length} 行）`, 'success');
+    }
+    function requestSourceOrders() {
+        updateSourceOrderStatus('正在读取本地订单队列…');
+        GM_xmlhttpRequest({method:'GET', url:ORDER_QUEUE_URL, timeout:10000,
+            onload: response => { try { if (response.status < 200 || response.status >= 300) throw new Error(`HTTP ${response.status}`); const orders=JSON.parse(response.responseText); if (!Array.isArray(orders) || !orders.length) throw new Error('队列为空或格式不正确'); sourceOrders=orders; loadSourceOrder(0); } catch(e) { updateSourceOrderStatus(`读取失败：${e.message}`); log(`读取本地订单队列失败：${e.message}`,'error'); } },
+            onerror: () => { updateSourceOrderStatus('连接失败，请先启动本地订单服务'); log('无法连接本地订单服务（127.0.0.1:8766）','error'); },
+            ontimeout: () => { updateSourceOrderStatus('连接超时，请确认本地订单服务正在运行'); log('读取本地订单队列超时','error'); }
+        });
     }
 
     // 解析数据
@@ -2594,6 +2635,9 @@
     }
 
     document.getElementById('btn-fill').addEventListener('click', smartFillData);
+    document.getElementById('btn-load-orders').addEventListener('click', requestSourceOrders);
+    document.getElementById('btn-prev-order').addEventListener('click', () => loadSourceOrder(sourceOrderIndex - 1));
+    document.getElementById('btn-next-order').addEventListener('click', () => loadSourceOrder(sourceOrderIndex + 1));
     document.getElementById('btn-repair-cells').addEventListener('click', runRepairCellsOnly);
     document.getElementById('btn-check-amount').addEventListener('click', checkDealAmount);
     document.getElementById('input-qty').addEventListener('input', updateExpectedTotalUI);
@@ -2611,6 +2655,7 @@
     // 设置初始状态
     switchOrderType('purchase');
     updateExpectedTotalUI();
+    requestSourceOrders();
 
     // 检测API并初始化
     const api = getGridApi();

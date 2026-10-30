@@ -258,17 +258,35 @@ def filter_from(orders, from_order: str | None):
     raise SystemExit(f"队列中找不到订单号 {from_order}")
 
 
-def serve(out_dir: Path, port: int):
+def serve(out_dir: Path, port: int, queue_file: Path):
     class Handler(SimpleHTTPRequestHandler):
+        def do_GET(self):
+            if self.path.split("?", 1)[0] == "/api/orders":
+                try:
+                    payload = queue_file.read_bytes()
+                except OSError as exc:
+                    self.send_error(500, f"无法读取订单队列: {exc}")
+                    return
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Content-Length", str(len(payload)))
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                self.wfile.write(payload)
+                return
+            super().do_GET()
+
         def __init__(self, *a, **k):
             super().__init__(*a, directory=str(out_dir), **k)
 
         def log_message(self, fmt, *args):
             sys.stderr.write("%s - %s\n" % (self.address_string(), fmt % args))
 
-    httpd = ThreadingHTTPServer(("0.0.0.0", port), Handler)
+    httpd = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     print(f"clipserve: http://127.0.0.1:{port}/  (目录 {out_dir})")
     print("首页: http://127.0.0.1:%d/index.html" % port)
+    print(f"订单接口: http://127.0.0.1:{port}/api/orders")
     print("Ctrl+C 停止")
     try:
         httpd.serve_forever()
@@ -348,7 +366,7 @@ def main():
     if args.serve:
         if args.no_html:
             raise SystemExit("--serve 需要生成 html（不要加 --no-html）")
-        serve(args.out_dir, args.port)
+        serve(args.out_dir, args.port, args.queue)
 
 
 if __name__ == "__main__":
