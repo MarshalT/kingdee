@@ -75,7 +75,7 @@ def load_header_map(header_row):
         raise SystemExit("表头缺少「订单号」列")
     code_i = idx["订单号"] + 1
     idx["_商品编码"] = code_i
-    need = ["日期", "订单号", "名称", "数量", "单位", "单价（供应商）", "供应商名称", "供应商结算价格"]
+    need = ["日期", "订单号", "名称", "数量", "单位", "单价（供应商）", "供应商名称", "供应商结算价格", "单价（精实）", "总价（精实）", "精实价格总计"]
     miss = [n for n in need if n not in idx]
     if miss:
         raise SystemExit(f"表头缺少列: {', '.join(miss)}")
@@ -103,6 +103,9 @@ def read_excel(path: Path):
         unit = _cell(row[idx["单位"]]) or ""
         price = _num(row[idx["单价（供应商）"]])
         settlement_price = _num(row[idx["供应商结算价格"]])
+        sales_price = _num(row[idx["单价（精实）"]])
+        sales_line_total = _num(row[idx["总价（精实）"]])
+        sales_total = _num(row[idx["精实价格总计"]])
         d = _cell(row[idx["日期"]])
         if qty is None or price is None:
             continue
@@ -120,8 +123,11 @@ def read_excel(path: Path):
                 "spec": spec or "",
                 "qty": qty,
                 "unit": str(unit),
-                "price": price,
+                "price": round(price, 5),
                 "settlementPrice": settlement_price,
+                "salesPrice": round(sales_price, 5) if sales_price is not None else None,
+                "salesLineTotal": sales_line_total,
+                "salesTotal": sales_total,
             }
         )
     wb.close()
@@ -142,6 +148,8 @@ def split_orders(rows):
                     "supplier": r["supplier"],
                     "date": r["date"],
                     "settlementPrice": r["settlementPrice"],
+                    "salesTotal": r["salesTotal"],
+                    "salesLineTotal": r["salesLineTotal"],
                     "lines": [],
                 }
             )
@@ -150,6 +158,10 @@ def split_orders(rows):
             g["date"] = r["date"]
         if g["settlementPrice"] is None and r["settlementPrice"] is not None:
             g["settlementPrice"] = r["settlementPrice"]
+        if g["salesTotal"] is None and r["salesTotal"] is not None:
+            g["salesTotal"] = r["salesTotal"]
+        if g["salesLineTotal"] is None and r["salesLineTotal"] is not None:
+            g["salesLineTotal"] = r["salesLineTotal"]
         g["lines"].append(
             {
                 "code": r["code"],
@@ -159,12 +171,16 @@ def split_orders(rows):
                 "unit": r["unit"],
                 "price": r["price"],
                 "settlementPrice": r["settlementPrice"],
+                "salesPrice": r["salesPrice"],
+                "salesLineTotal": r["salesLineTotal"],
             }
         )
     for g in groups:
         total = sum(l["qty"] * l["price"] for l in g["lines"])
         g["expectedTotal"] = round(total + 1e-9, 2)
         g["settlementTotal"] = round(sum(l["qty"] * (l["settlementPrice"] or 0) for l in g["lines"]) + 1e-9, 2)
+        g.setdefault("salesTotal", None)
+        g["salesLineTotal"] = round(sum(l["salesLineTotal"] or 0 for l in g["lines"]) + 1e-9, 2)
     return groups
 
 

@@ -676,7 +676,11 @@
         const { total, lines } = computeExpectedTotal();
         const totalEl = document.getElementById('expected-total');
         const linesEl = document.getElementById('expected-lines');
-        if (totalEl) totalEl.textContent = total.toFixed(2);
+        const sourceOrder = sourceOrders[sourceOrderIndex];
+        const displayedTotal = orderType === 'sales' && sourceOrder?.salesTotal != null
+            ? Number(sourceOrder.salesTotal)
+            : total;
+        if (totalEl) totalEl.textContent = displayedTotal.toFixed(2);
         if (linesEl) linesEl.textContent = String(lines);
         resetAmountCheckUI();
     }
@@ -868,9 +872,15 @@
         document.getElementById('source-order-meta').textContent = `供应商：${order.supplier || '—'} · 供应商结算价格：${order.settlementPrice ?? '—'}`;
         document.getElementById('input-codes').value = lines.map(line => line.code || '').join('\n');
         document.getElementById('input-qty').value = lines.map(line => line.qty ?? '').join('\n');
-        document.getElementById('input-price').value = lines.map(line => line.price ?? '').join('\n');
+        document.getElementById('input-price').value = lines.map(line => {
+            const price = orderType === 'sales' ? line.salesPrice : line.price;
+            return price == null || price === '' ? '' : Number(price).toFixed(5);
+        }).join('\n');
         sourceOrderIndex = index; updateExpectedTotalUI();
-        updateSourceOrderStatus(`第 ${index + 1}/${sourceOrders.length} 单：${order.orderNo} · ${order.supplier} · 预期 ${order.expectedTotal ?? '—'} · 供应商结算价格 ${order.settlementPrice ?? '—'}`);
+        const expectedLabel = orderType === 'sales'
+            ? `预期 ${order.salesLineTotal ?? '—'} · 精实价格总计 ${order.salesTotal ?? '—'}`
+            : `预期 ${order.expectedTotal ?? '—'} · 供应商结算价格 ${order.settlementPrice ?? '—'}`;
+        updateSourceOrderStatus(`第 ${index + 1}/${sourceOrders.length} 单：${order.orderNo} · ${order.supplier} · ${order.date || '—'} · ${expectedLabel}`);
         log(`已载入队列第 ${index + 1} 单：${order.orderNo} / ${order.supplier}（${lines.length} 行）`, 'success');
     }
     function requestSourceOrders() {
@@ -2561,6 +2571,14 @@
     // 切换订单类型
     function switchOrderType(type) {
         orderType = type;
+        if (sourceOrderIndex >= 0) {
+            const lines = sourceOrders[sourceOrderIndex].lines || [];
+            document.getElementById('input-price').value = lines.map(line => {
+                const price = type === 'sales' ? line.salesPrice : line.price;
+                return price == null || price === '' ? '' : Number(price).toFixed(5);
+            }).join('\n');
+            updateExpectedTotalUI();
+        }
         const btnPurchase = document.getElementById('btn-purchase');
         const btnSales = document.getElementById('btn-sales');
         const sectionQty = document.getElementById('section-qty');
