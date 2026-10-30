@@ -179,6 +179,19 @@ def html_copy_page(title: str, body: str) -> str:
     )
 
 
+def html_combined_page(title: str, paste_body: str, codes_body: str, next_url: str | None) -> str:
+    # 合并页：同时查看价量和编码，分别复制，并可切换下一单
+    import json as _json
+    paste_json = _json.dumps(paste_body, ensure_ascii=False)
+    codes_json = _json.dumps(codes_body, ensure_ascii=False)
+    next_html = f"<a href=\"{next_url}\">下一单 →</a>" if next_url else "<span>已经是最后一单</span>"
+    return f"""<!DOCTYPE html><html><head><meta charset=utf-8><title>{title}</title>
+<style>body{{font-family:Arial,sans-serif;margin:24px}} .cols{{display:flex;gap:32px;align-items:flex-start}} .box{{flex:1}} pre{{border:1px solid #ccc;padding:12px;min-height:120px;white-space:pre-wrap}} button,a{{font-size:18px;margin-right:12px}} a{{display:inline-block;margin-top:24px}}</style></head><body>
+<h1>{title}</h1><div class=cols><section class=box><h2>价量</h2><pre id=p></pre><button onclick=copyText('p')>复制价量</button></section><section class=box><h2>编码</h2><pre id=c></pre><button onclick=copyText('c')>复制编码</button></section></div><div>{next_html}</div>
+<script>const P={paste_json}, C={codes_json}; document.getElementById('p').innerText=P; document.getElementById('c').innerText=C; async function copyText(id){{await navigator.clipboard.writeText(document.getElementById(id).innerText);}}</script></body></html>
+"""
+
+
 def write_clip_pages(orders, out_dir: Path, index_base: int = 0):
     out_dir.mkdir(parents=True, exist_ok=True)
     written = []
@@ -201,6 +214,7 @@ def write_clip_pages(orders, out_dir: Path, index_base: int = 0):
         stem = f"{o['orderNo']}-{idx}"
         paste_name = f"paste-{stem}.html"
         codes_name = f"codes-{stem}.html"
+        combined_name = f"order-{stem}.html"
         (out_dir / paste_name).write_text(
             html_copy_page(f"paste {o['orderNo']}", "\n".join(paste_lines)),
             encoding="utf-8",
@@ -210,16 +224,25 @@ def write_clip_pages(orders, out_dir: Path, index_base: int = 0):
             encoding="utf-8",
         )
         o["clipIndex"] = idx
+        o["combinedName"] = combined_name
+        o["combinedUrl"] = f"http://127.0.0.1:8766/{combined_name}"
+        written.append((paste_name, codes_name, combined_name))
         o["pasteUrl"] = f"http://127.0.0.1:8766/{paste_name}"
         o["codesUrl"] = f"http://127.0.0.1:8766/{codes_name}"
-        written.append((paste_name, codes_name))
+        # 合并页在所有订单链接确定后再写入，以便知道下一单
+    for i, o in enumerate(orders):
+        next_url = orders[i + 1].get("combinedUrl") if i + 1 < len(orders) else None
+        paste_body = "\n".join(f"{format(l['qty'], '.15g')}\t{l['unit']}\t{format(l['price'], '.15g')}" for l in o["lines"])
+        codes_body = "\n".join(l["code"] or "" for l in o["lines"])
+        (out_dir / o["combinedName"]).write_text(html_combined_page(f"{o['orderNo']} · {o['supplier']}", paste_body, codes_body, next_url), encoding="utf-8")
     # 索引页方便人工点选
     links = ["<!DOCTYPE html><meta charset=utf-8><title>clipserve index</title><h1>录单复制页</h1><ol>"]
     for o in orders:
         links.append(
             f"<li><b>{o['orderNo']}</b> · {o['supplier']} · 预期 {o['expectedTotal']} · "
             f"<a href='paste-{o['orderNo']}-{o['clipIndex']}.html'>价量</a> · "
-            f"<a href='codes-{o['orderNo']}-{o['clipIndex']}.html'>编码</a></li>"
+            f"<a href='codes-{o['orderNo']}-{o['clipIndex']}.html'>编码</a> · "
+            f"<a href='order-{o['orderNo']}-{o['clipIndex']}.html'>合并操作页</a></li>"
         )
     links.append("</ol>")
     (out_dir / "index.html").write_text("\n".join(links), encoding="utf-8")
