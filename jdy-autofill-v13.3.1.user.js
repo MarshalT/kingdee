@@ -160,9 +160,14 @@
             <style>
                 #jdy-final-panel {
                     position: fixed;
-                    top: 100px;
-                    right: 20px;
-                    width: 400px;
+                    top: max(8px, 4vh);
+                    right: max(8px, 2vw);
+                    width: min(400px, calc(100vw - 16px));
+                    max-height: calc(100vh - 16px);
+                    display: flex;
+                    flex-direction: column;
+                    box-sizing: border-box;
+                    overflow: hidden;
                     background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
                     border-radius: 12px;
                     box-shadow: 0 15px 40px rgba(0,0,0,0.5);
@@ -234,6 +239,10 @@
                 }
                 .final-content {
                     padding: 18px;
+                    overflow-y: auto;
+                    overscroll-behavior: contain;
+                    min-height: 0;
+                    box-sizing: border-box;
                 }
                 .final-section {
                     background: rgba(255,255,255,0.1);
@@ -251,6 +260,8 @@
                 }
                 .final-textarea {
                     width: 100%;
+                    max-width: 100%;
+                    box-sizing: border-box;
                     min-height: 90px;
                     padding: 10px;
                     border: none;
@@ -266,6 +277,7 @@
                 }
                 .final-date-input {
                     width: 100%;
+                    box-sizing: border-box;
                     padding: 10px;
                     border: none;
                     border-radius: 6px;
@@ -286,8 +298,11 @@
                     display: grid;
                     grid-template-columns: 1fr 1fr;
                     gap: 10px;
+                    min-width: 0;
                 }
                 .final-btn {
+                    min-width: 0;
+                    overflow-wrap: anywhere;
                     padding: 12px;
                     border: none;
                     border-radius: 8px;
@@ -413,6 +428,15 @@
                     color: white;
                     width: 100%;
                     margin-top: 8px;
+                }
+                @media (max-width: 520px) {
+                    #jdy-final-panel { left: 8px; right: 8px; top: 8px; width: auto; max-height: calc(100vh - 16px); }
+                    .final-content { padding: 12px; }
+                    .final-section { padding: 10px; margin-bottom: 10px; }
+                    .final-header { padding: 10px 12px; }
+                    .final-title { font-size: 14px; gap: 5px; }
+                    .final-buttons { gap: 6px; }
+                    .final-btn { padding: 9px 6px; font-size: 12px; }
                 }
             </style>
 
