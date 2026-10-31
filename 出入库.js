@@ -288,6 +288,27 @@
             return { total: 0, success: 0 };
         }
 
+        // 金蝶仓库表头的 batchAdd 图标是原生“批量设置”入口。
+        // 优先使用它，可以覆盖虚拟滚动表格的全部行，避免只处理当前可见行。
+        const batchIcon = root.querySelector('th[data-code="stockid"] i.kdfont-batchAdd');
+        if (batchIcon && isVisible(batchIcon)) {
+            activateBatchWarehouseButton(batchIcon);
+            // 弹窗可能由金蝶异步挂载，等待实际仓库基础资料表，而不是固定延时后立即查找。
+            const popupDeadline = Date.now() + 2500;
+            while (Date.now() < popupDeadline) {
+                const visibleStockTable = Array.from(document.querySelectorAll('.kd-table'))
+                    .some(table => table !== root && isVisible(table) && table.querySelector('td[data-code="stockname"]'));
+                if (visibleStockTable) break;
+                await sleep(100);
+            }
+            const selected = await chooseWarehouseFromBatchPopup(warehouseValue);
+            if (selected) {
+                log(`已通过仓库表头批量设置全部明细行：${warehouseValue}`, 'success');
+                return { total: -1, success: -1, batch: true };
+            }
+            log('仓库批量选择窗口未找到目标仓库，改用逐行填充', 'warn');
+        }
+
         const cells = getVisibleWarehouseCells(root);
         if (!cells.length) {
             log('未找到仓库列单元格', 'error');
@@ -299,6 +320,69 @@
             if (await fillWarehouseCell(cells[i], warehouseValue, i + 1)) success++;
         }
         return { total: cells.length, success };
+    }
+
+    function getVisibleWarehousePopupRows() {
+        const selectors = [
+            '[role="dialog"] tr', '[role="listbox"] [role="option"]',
+            '.kd-modal tr', '.kd-dropdown tr', '.kd-select-dropdown tr',
+            '.kd-table tbody tr'
+        ];
+        const rows = [];
+        for (const selector of selectors) {
+            for (const el of document.querySelectorAll(selector)) {
+                if (isInHelperPanel(el) || !isVisible(el)) continue;
+                const rect = el.getBoundingClientRect();
+                if (rect.width < 80 || rect.height < 18) continue;
+                const text = normalizeText(el.textContent);
+                if (text) rows.push(el);
+            }
+        }
+        return Array.from(new Set(rows));
+    }
+
+    async function chooseWarehouseFromBatchPopup(warehouseValue) {
+        const target = normalizeText(warehouseValue);
+        const deadline = Date.now() + 3000;
+        while (Date.now() < deadline) {
+            // 仓库基础资料弹窗使用独立的 kd-table，列标识为 stockno/stockname。
+            // 优先按仓库名称精确匹配，避免把明细表中的仓库单元格误当成弹窗选项。
+            const stockNameCell = Array.from(document.querySelectorAll('td[data-code="stockname"]'))
+                .find(cell => isVisible(cell) && normalizeText(cell.textContent) === target);
+            if (stockNameCell) {
+                const row = stockNameCell.closest('tr');
+                if (row) {
+                    row.click();
+                    await sleep(220);
+                    return true;
+                }
+            }
+            const rows = getVisibleWarehousePopupRows();
+            const exact = rows.find(row => {
+                const cells = Array.from(row.querySelectorAll('td,[role="cell"]'));
+                const text = normalizeText(row.textContent);
+                return cells.some(cell => normalizeText(cell.textContent) === target) || text === target;
+            });
+            if (exact) {
+                exact.click();
+                await sleep(180);
+                return true;
+            }
+            await sleep(100);
+        }
+        return false;
+    }
+
+    function activateBatchWarehouseButton(batchIcon) {
+        const rect = batchIcon.getBoundingClientRect();
+        for (const type of ['mousedown', 'mouseup', 'click']) {
+            batchIcon.dispatchEvent(new MouseEvent(type, {
+                bubbles: true, cancelable: true, composed: true, view: window,
+                button: 0, buttons: type === 'mousedown' ? 1 : 0,
+                clientX: rect.left + rect.width / 2,
+                clientY: rect.top + rect.height / 2
+            }));
+        }
     }
 
     const panel = document.createElement('div');
@@ -410,7 +494,12 @@
             }
             const auditResult = await clickAuditButton();
 
-            const summary = `单据：${detectBillType()}\n日期：${dateOk ? '✓' : '✗'}\n仓库：${fillWarehouseEnabled ? `${warehouseResult.success}/${warehouseResult.total}` : '已跳过'}\n审核：${auditResult.clicked ? '已点击' : auditResult.skipped ? '已跳过' : '未找到'}`;
+            const warehouseSummary = !fillWarehouseEnabled
+                ? '已跳过'
+                : warehouseResult.batch
+                    ? '已通过表头批量设置全部明细行'
+                    : `${warehouseResult.success}/${warehouseResult.total}`;
+            const summary = `单据：${detectBillType()}\n日期：${dateOk ? '✓' : '✗'}\n仓库：${warehouseSummary}\n审核：${auditResult.clicked ? '已点击' : auditResult.skipped ? '已跳过' : '未找到'}`;
             log(`填充完成：${summary.replace(/\n/g, ' / ')}`, warehouseResult.success > 0 || warehouseResult.skipped || dateOk ? 'success' : 'error');
             // alert(summary);
         } catch (error) {
