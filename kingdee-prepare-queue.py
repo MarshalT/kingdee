@@ -262,7 +262,7 @@ def write_clip_pages(orders, out_dir: Path, index_base: int = 0):
     links = [
         "<!DOCTYPE html><meta charset=utf-8><title>clipserve index</title>",
         "<style>body{font-family:Arial,sans-serif;margin:24px} .page-title{display:flex;align-items:center;gap:24px} .page-title h1{margin:0} .audit-link{font-size:20px;padding:10px 16px;border:1px solid #1677ff;border-radius:8px;background:#eef6ff;text-decoration:none} li{margin:8px 0}</style>",
-        "<div class='page-title'><h1>录单复制页</h1><a class='audit-link' href='price-differences.html'>价格差异清单</a></div><ol>",
+        "<div class='page-title'><h1>录单复制页</h1><a class='audit-link' href='price-differences.html'>价格差异清单</a><a class='audit-link' href='empty-codes.html'>商品编码为空</a></div><ol>",
     ]
     for o in orders:
         links.append(
@@ -310,6 +310,30 @@ def write_clip_pages(orders, out_dir: Path, index_base: int = 0):
     add_audit_table("销售订单", "salesLineTotal", "salesTotal", "总价（精实）合计", "精实价格总计")
     audit.append("</body></html>")
     (out_dir / "price-differences.html").write_text("\n".join(audit), encoding="utf-8")
+
+    empty_codes = [
+        "<!DOCTYPE html><html><head><meta charset='utf-8'><title>商品编码为空</title>",
+        "<style>body{font-family:Arial,sans-serif;margin:24px;color:#222}a{color:#1677ff}h1{margin-bottom:8px}.hint{color:#666;margin:0 0 20px}table{border-collapse:collapse;width:100%;margin:16px 0}th,td{border:1px solid #ddd;padding:9px 12px;text-align:left}th{background:#fff3e0}.num{text-align:center}.empty{padding:12px;color:#388e3c;background:#f1f8e9}</style></head><body>",
+        "<p><a href='index.html'>← 返回录单复制页</a></p><h1>商品编码为空</h1><p class='hint'>以下商品行的商品编码为空，建议补充编码后再填充订单。</p>",
+    ]
+    empty_rows = []
+    for order in orders:
+        for line_no, line in enumerate(order.get("lines", []), 1):
+            if not str(line.get("code") or "").strip():
+                empty_rows.append((order, line_no, line))
+    if not empty_rows:
+        empty_codes.append("<div class='empty'>没有发现商品编码为空的商品行。</div>")
+    else:
+        empty_codes.append("<table><thead><tr><th>订单号</th><th>供应商</th><th class='num'>行号</th><th>商品名称</th><th>型号</th><th>数量</th><th>单价</th></tr></thead><tbody>")
+        for order, line_no, line in empty_rows:
+            empty_codes.append(
+                f"<tr><td>{order['orderNo']}</td><td>{order['supplier']}</td><td class='num'>{line_no}</td>"
+                f"<td>{line.get('name', '')}</td><td>{line.get('spec', '')}</td>"
+                f"<td class='num'>{line.get('qty', '')}</td><td class='num'>{line.get('price', '')}</td></tr>"
+            )
+        empty_codes.append("</tbody></table>")
+    empty_codes.append("</body></html>")
+    (out_dir / "empty-codes.html").write_text("\n".join(empty_codes), encoding="utf-8")
     return written
 
 
