@@ -1,0 +1,5 @@
+path/to/venv/bin/python kingdee-prepare-queue.py "6月订单1.1.xlsx" \
+  --queue "/tmp/kingdee-queue.json" \
+  --manifest "/tmp/kingdee-manifest.json" \
+  --out-dir "/tmp/clipserve" \
+  --serve
