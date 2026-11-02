@@ -7,6 +7,8 @@
   python3 kingdee-prepare-queue.py 订单.xlsx --serve          # 生成后起 8766 服务
   python3 kingdee-prepare-queue.py 订单.xlsx --from CGDD252607  # 从该订单号起（含）
 
+客户映射：备注「开尔文」→ 广东开尔文智能科技有限公司；「精实」→ 珠海精实测控技术股份有限公司。
+
 Excel 列约定（表头名）：
   日期 / 订单号 / 名称 / 型号 / 数量 / 单位 / 单价（供应商）/ 供应商名称
   商品编码：订单号右侧那一列（表头可为空）
@@ -54,6 +56,16 @@ def _normalize_supplier(value):
     return "零星供应商（淘宝）" if "淘宝" in supplier else supplier
 
 
+def _normalize_sales_customer(value):
+    """将订单表「备注」中的销售客户简称映射为金蝶客户全称。"""
+    remark = str(value or "").strip()
+    if "开尔文" in remark:
+        return "广东开尔文智能科技有限公司"
+    if "精实" in remark:
+        return "珠海精实测控技术股份有限公司"
+    return ""
+
+
 def _num(v, default=None):
     if v is None or v == "":
         return default
@@ -87,7 +99,7 @@ def load_header_map(header_row):
         raise SystemExit("表头缺少「订单号」列")
     code_i = idx["订单号"] + 1
     idx["_商品编码"] = code_i
-    need = ["日期", "订单号", "名称", "数量", "单位", "单价（供应商）", "供应商名称", "供应商结算价格", "单价（精实）", "总价（精实）", "精实价格总计"]
+    need = ["日期", "订单号", "名称", "数量", "单位", "单价（供应商）", "供应商名称", "供应商结算价格", "单价（精实）", "总价（精实）", "精实价格总计", "备注"]
     miss = [n for n in need if n not in idx]
     if miss:
         raise SystemExit(f"表头缺少列: {', '.join(miss)}")
@@ -119,6 +131,7 @@ def read_excel(path: Path):
         sales_price = _num(row[idx["单价（精实）"]])
         sales_line_total = _num(row[idx["总价（精实）"]])
         sales_total = _num(row[idx["精实价格总计"]])
+        sales_customer = _normalize_sales_customer(_cell(row[idx["备注"]]))
         d = _cell(row[idx["日期"]])
         if qty is None or price is None:
             continue
@@ -141,6 +154,8 @@ def read_excel(path: Path):
                 "salesPrice": round(sales_price, 5) if sales_price is not None else None,
                 "salesLineTotal": sales_line_total,
                 "salesTotal": sales_total,
+                "salesCustomer": sales_customer,
+                "salesRemark": _cell(row[idx["备注"]]) or "",
             }
         )
     wb.close()
@@ -295,6 +310,8 @@ def split_orders(rows):
                     "settlementPrice": r["settlementPrice"],
                     "salesTotal": r["salesTotal"],
                     "salesLineTotal": r["salesLineTotal"],
+                    "salesCustomer": r["salesCustomer"],
+                    "salesRemark": r["salesRemark"],
                     "lines": [],
                 }
             )
@@ -307,6 +324,10 @@ def split_orders(rows):
             g["salesTotal"] = r["salesTotal"]
         if g["salesLineTotal"] is None and r["salesLineTotal"] is not None:
             g["salesLineTotal"] = r["salesLineTotal"]
+        if not g.get("salesCustomer") and r.get("salesCustomer"):
+            g["salesCustomer"] = r["salesCustomer"]
+        if not g.get("salesRemark") and r.get("salesRemark"):
+            g["salesRemark"] = r["salesRemark"]
         g["lines"].append(
             {
                 "code": r["code"],

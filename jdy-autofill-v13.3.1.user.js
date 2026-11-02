@@ -61,7 +61,7 @@
         '广东开尔文智能科技有限公司',
         '珠海精实测控技术股份有限公司'
     ];
-    let selectedSalesCustomer = salesCustomers[0];
+    let selectedSalesCustomer = '';
 
     function isElementVisible(el) {
         if (!el || typeof el.getBoundingClientRect !== 'function') return false;
@@ -598,6 +598,7 @@
                         <span>客户</span>
                     </div>
                     <select class="final-date-input" id="input-customer">
+                        <option value="">从订单备注自动读取客户</option>
                         ${salesCustomers.map(name => `<option value="${name}">${name}</option>`).join('')}
                     </select>
                     <div class="final-hint">💡 销售订单模式会自动将这里的客户写入页面中的客户输入框</div>
@@ -1196,6 +1197,8 @@
         if (index < 0 || index >= sourceOrders.length) return { success: false, error: '订单索引超出队列范围', index, orderCount: sourceOrders.length };
         const order = sourceOrders[index]; const lines = Array.isArray(order.lines) ? order.lines : [];
         document.getElementById('input-date').value = order.date || savedDate; savedDate = order.date || savedDate;
+        selectedSalesCustomer = String(order.salesCustomer || '');
+        document.getElementById('input-customer').value = selectedSalesCustomer;
         document.getElementById('source-order-meta').textContent = `供应商：${order.supplier || '—'} · 供应商结算价格：${order.settlementPrice ?? '—'}`;
         document.getElementById('input-codes').value = lines.map(line => line.code || '').join('\n');
         document.getElementById('input-qty').value = lines.map(line => line.qty ?? '').join('\n');
@@ -2358,7 +2361,8 @@
             const totalDataCount = isSalesOrder ? orderData.prices.length : Math.max(orderData.quantities.length, orderData.prices.length);
             await applyDocumentDate();
             if (isSalesOrder) {
-                await applySalesCustomer();
+                const customerOk = await applySalesCustomer();
+                if (!customerOk) return { success: false, error: '销售客户未成功选择，已停止商品填充' };
             } else {
                 await applyQueueSupplier();
             }
@@ -2618,20 +2622,8 @@
     }
 
     function findCustomerInput() {
-        const findVisibleInput = (root) => Array.from(root.querySelectorAll('input[type="text"], input[data-field="field"], input'))
-            .find(inp => isElementVisible(inp));
-
-        for (const el of Array.from(document.querySelectorAll('*'))) {
-            if ((el.textContent || '').trim() !== '客户') continue;
-            let parent = el.parentElement;
-            for (let i = 0; i < 6 && parent; i++) {
-                const matched = findVisibleInput(parent);
-                if (matched) return matched;
-                parent = parent.parentElement;
-            }
-        }
-
-        return null;
+        const input = document.querySelector('[data-id="customerid"] input');
+        return input && isElementVisible(input) && !input.disabled && !input.readOnly ? input : null;
     }
 
     async function applyDocumentDate() {
@@ -2671,9 +2663,9 @@
     }
 
     async function applySalesCustomer() {
-        const customerInputValue = selectedSalesCustomer || '';
+        const customerInputValue = String(sourceOrders[sourceOrderIndex]?.salesCustomer || selectedSalesCustomer || '').trim();
         if (!customerInputValue.trim()) {
-            log('⚠️ 销售订单未选择客户，跳过客户填充', 'warn');
+            log('❌ 当前队列单备注未映射到销售客户，已停止客户填充；请检查 Excel「备注」列', 'error');
             return false;
         }
 
@@ -2693,10 +2685,34 @@
             nativeInputValueSetter.call(customerInput, customerInputValue);
             customerInput.dispatchEvent(new Event('input', { bubbles: true }));
             customerInput.dispatchEvent(new Event('change', { bubbles: true }));
-            customerInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', keyCode: 13, bubbles: true }));
-            customerInput.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', keyCode: 13, bubbles: true }));
-            customerInput.blur();
-            await new Promise(resolve => setTimeout(resolve, 150));
+            // 与供应商选择器相同：先让基础资料控件完成搜索，再点选精确候选项。
+            await new Promise(resolve => setTimeout(resolve, 400));
+            // 与 applyQueueSupplier 完全一致：从可见候选元素中找名称文本精确匹配项，直接点击该元素。
+            const options = [...document.querySelectorAll('.basedata-lookup-list li [title], [role="option"], li, .ant-select-item, [class*="option"], [class*="Option"]')]
+                .filter(el => isElementVisible(el) && (el.getAttribute('title') || (el.textContent || '')).replace(/\s+/g, ' ').trim() === customerInputValue);
+            const matched = options.length === 1 ? options[0] : null;
+            if (!matched) {
+                log(`❌ 客户下拉列表精确匹配项数量为 ${options.length}：${customerInputValue}`, 'error');
+                return false;
+            }
+            const rect = matched.getBoundingClientRect();
+            // Tampermonkey 的隔离世界 Window 不能用作 PointerEvent.view；省略 view 让事件使用页面默认视图。
+            const eventOptions = { bubbles: true, cancelable: true, clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2, button: 0 };
+            // 金蝶客户资料列表依赖指针/鼠标按下和抬起完成绑定；click() 单事件只会关闭列表并清空输入。
+            if (typeof PointerEvent === 'function') {
+                matched.dispatchEvent(new PointerEvent('pointerdown', { ...eventOptions, pointerId: 1, pointerType: 'mouse', isPrimary: true }));
+            }
+            matched.dispatchEvent(new MouseEvent('mousedown', eventOptions));
+            if (typeof PointerEvent === 'function') {
+                matched.dispatchEvent(new PointerEvent('pointerup', { ...eventOptions, pointerId: 1, pointerType: 'mouse', isPrimary: true }));
+            }
+            matched.dispatchEvent(new MouseEvent('mouseup', eventOptions));
+            matched.dispatchEvent(new MouseEvent('click', eventOptions));
+            const selected = await waitForCondition(() => String(customerInput.value || '').trim() === customerInputValue, 2000, 100);
+            if (!selected) {
+                log(`❌ 客户候选项已点击，但控件未保留名称：${customerInputValue}（当前值：${String(customerInput.value || '').trim() || '空'}）`, 'error');
+                return false;
+            }
             log(`🏢 客户已设置为 ${customerInputValue}`, 'success');
             return true;
         } catch (error) {
