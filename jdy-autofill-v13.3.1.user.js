@@ -429,6 +429,8 @@
                     width: 100%;
                     margin-top: 8px;
                 }
+                .btn-order-action { background: #fff3e0; color: #7a3e00; border: 1px solid #ffcc80; }
+                .btn-audit-action { background: #ffebee; color: #b71c1c; border: 1px solid #ef9a9a; }
                 @media (max-width: 520px) {
                     #jdy-final-panel { left: 8px; right: 8px; top: 8px; width: auto; max-height: calc(100vh - 16px); }
                     .final-content { padding: 12px; }
@@ -594,6 +596,10 @@
                         <span>🗑️</span>
                         <span>清空</span>
                     </button>
+                </div>
+                <div class="final-buttons" style="margin-top:8px; grid-template-columns:1fr 1fr;">
+                    <button class="final-btn btn-order-action" id="btn-new-order" type="button">➕ 新建单据</button>
+                    <button class="final-btn btn-audit-action" id="btn-audit-order" type="button">✅ 审核单据</button>
                 </div>
 
                 <div class="final-section" id="progress-section" style="display:none;">
@@ -910,7 +916,24 @@
         if (action === 'check-amount') return checkDealAmount();
         if (action === 'clear') return clearData();
         if (action === 'refresh') return detectRows();
+        if (action === 'new-order') return clickKingdeeAction(['新增', '新建']);
+        if (action === 'audit') {
+            const amount = checkDealAmount();
+            if (!amount || amount.consistent !== true) throw new Error(`金额未核对一致，已阻止审核（预期 ${amount?.expected ?? '—'}，页面 ${amount?.deal ?? '—'}，差额 ${amount?.difference ?? '—'}）`);
+            return clickKingdeeAction(['审核']);
+        }
         throw new Error(`未知接口动作：${action}`);
+    }
+
+    function clickKingdeeAction(labels) {
+        const labelSet = new Set(labels);
+        const candidates = [...document.querySelectorAll('button,[role=button],a')]
+            .filter(el => el.getClientRects().length && labelSet.has((el.innerText || el.textContent || '').replace(/\s+/g, '').trim()));
+        if (candidates.length !== 1) throw new Error(`页面上${candidates.length ? '存在多个' : `未找到“${labels.join('”或“')}”`}按钮；未执行操作`);
+        const label = (candidates[0].innerText || candidates[0].textContent || '').replace(/\s+/g, '').trim();
+        candidates[0].click();
+        log(`已点击金蝶“${label}”按钮；如页面弹出确认窗口，请在金蝶页面完成确认。`, 'info');
+        return { clicked: true, action: label };
     }
 
     let commandPollInFlight = false;
@@ -2732,6 +2755,8 @@
     }
 
     document.getElementById('btn-fill').addEventListener('click', smartFillData);
+    document.getElementById('btn-new-order').addEventListener('click', () => { if (confirm('将点击金蝶“新增”并打开一张新单据。继续吗？')) executeControlCommand({ action: 'new-order' }).catch(e => log(e.message, 'error')); });
+    document.getElementById('btn-audit-order').addEventListener('click', () => { if (confirm('审核会提交当前金蝶单据。请确认当前单据和金额均已核对。继续审核吗？')) executeControlCommand({ action: 'audit' }).catch(e => log(e.message, 'error')); });
     document.getElementById('btn-load-orders').addEventListener('click', requestSourceOrders);
     document.getElementById('btn-copy-supplier').addEventListener('click', () => { const name = sourceOrders[sourceOrderIndex]?.supplier; if (name) GM_setClipboard(name); });
     document.getElementById('btn-prev-order').addEventListener('click', () => loadSourceOrder(sourceOrderIndex - 1));

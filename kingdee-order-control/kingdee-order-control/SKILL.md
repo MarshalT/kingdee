@@ -24,7 +24,7 @@ python3 scripts/kingdee_control.py switch-type --type sales
 python3 scripts/kingdee_control.py check-amount
 ```
 
-Supported actions: `status`, `load-orders`, `next-order`, `previous-order`, `switch-type`, `fill-codes`, `paste-codes`, `paste-quantity-price`, `paste-price`, `smart-fill`, `repair`, `check-amount`, `clear`, and `refresh`. Use `switch-type --type purchase|sales`. Add `--base-url` if the service uses a different local address, and `--timeout` to adjust result wait time.
+Supported actions: `status`, `load-orders`, `next-order`, `previous-order`, `switch-type`, `fill-codes`, `paste-codes`, `paste-quantity-price`, `paste-price`, `smart-fill`, `repair`, `check-amount`, `clear`, `refresh`, `new-order`, and `audit`. `new-order` clicks 金蝶“新增/新建”. `audit` first verifies the page's deal amount matches the computed expected amount (tolerance 0.01), then clicks 金蝶“审核”; it will refuse when amount verification fails. Audit may submit the current document, so confirm the active document before invoking. Use `switch-type --type purchase|sales`. Add `--base-url` if the service uses a different local address, and `--timeout` to adjust result wait time.
 
 The client prints the completed command's JSON result and exits nonzero on execution error or timeout. For amount checks, report `expected`, `deal`, `difference`, `lines`, and `status` from the result; `status: unread` means the page amount could not be read and must not be represented as a successful match.
 
@@ -34,5 +34,5 @@ The client prints the completed command's JSON result and exits nonzero on execu
 - Do not call `smart-fill`, `fill-codes`, `repair`, or `clear` unless the user requested that operation or clearly authorized it.
 - `check-amount` is read-only and may be run to verify a fill.
 - Treat a timeout as unknown completion, not failure; inspect `status` before resubmitting a mutation to avoid duplicate actions.
-- Never claim an order was saved or audited: this bridge does not expose save or audit actions.
+- Never claim an order was saved or audited unless the page result confirms it; the audit action only reports that the page button was clicked.
 - The bridge listens only on localhost and should not be exposed to the network.

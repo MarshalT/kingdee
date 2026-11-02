@@ -43,6 +43,12 @@ def _cell(v):
     return v
 
 
+def _normalize_supplier(value):
+    """将淘宝相关供应商统一为金蝶中使用的零星供应商名称。"""
+    supplier = str(value).strip() if value is not None else ""
+    return "零星供应商（淘宝）" if "淘宝" in supplier else supplier
+
+
 def _num(v, default=None):
     if v is None or v == "":
         return default
@@ -94,6 +100,7 @@ def read_excel(path: Path):
         if not row or all(c is None or str(c).strip() == "" for c in row):
             continue
         order_no = _cell(row[idx["订单号"]])
+        # 分单前保留 Excel 原始供应商名称；归一化在分组完成后进行，避免提前合并不同供应商。
         supplier = _cell(row[idx["供应商名称"]])
         if not order_no or not supplier:
             continue
@@ -146,7 +153,7 @@ def split_orders(rows):
             groups.append(
                 {
                     "orderNo": r["orderNo"],
-                    "supplier": r["supplier"],
+                    "supplier": _normalize_supplier(r["supplier"]),
                     "date": r["date"],
                     "settlementPrice": r["settlementPrice"],
                     "salesTotal": r["salesTotal"],
@@ -349,6 +356,7 @@ def filter_from(orders, from_order: str | None):
 
 def serve(out_dir: Path, port: int, queue_file: Path):
     control = {"pending": None, "results": {}, "next_id": 1}
+    allowed_actions = {"status", "load-orders", "next-order", "previous-order", "switch-type", "fill-codes", "paste-codes", "paste-quantity-price", "paste-price", "smart-fill", "repair", "check-amount", "clear", "refresh", "audit", "new-order"}
     class Handler(SimpleHTTPRequestHandler):
         def do_GET(self):
             if self.path.split("?", 1)[0] == "/api/jdy/command":
@@ -384,6 +392,8 @@ def serve(out_dir: Path, port: int, queue_file: Path):
                 try: body = json.loads(self.rfile.read(length) or b"{}")
                 except json.JSONDecodeError: self.send_error(400, "JSON格式错误"); return
                 if path.endswith("/command"):
+                    if not isinstance(body, dict) or body.get("action") not in allowed_actions:
+                        self.send_error(400, "不支持的控制动作"); return
                     body["id"] = control["next_id"]; control["next_id"] += 1; control["pending"] = body
                     response = {"accepted": True, "id": body["id"]}
                 else:

@@ -8,7 +8,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-ACTIONS = {'status','load-orders','next-order','previous-order','switch-type','fill-codes','paste-codes','paste-quantity-price','paste-price','smart-fill','repair','check-amount','clear','refresh'}
+ACTIONS = {'status','load-orders','next-order','previous-order','switch-type','fill-codes','paste-codes','paste-quantity-price','paste-price','smart-fill','repair','check-amount','clear','refresh','audit','new-order'}
 
 def request(base, path, data=None, timeout=5):
     body = None if data is None else json.dumps(data).encode('utf-8')
