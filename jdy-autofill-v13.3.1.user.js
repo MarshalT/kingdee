@@ -53,8 +53,10 @@
     let sourceOrders = [];
     let sourceOrderIndex = -1;
     let gridApi = null;
-    let orderType = 'purchase'; // 'purchase' 或 'sales'
+    let orderType = 'purchase'; // 'purchase'、'sales' 或 'warehouse'
     let savedDate = getTodayDate(); // 保存的日期
+    let warehouseAutofillEnabled = false;
+    let warehouseValue = '01';
     const salesCustomers = [
         '广东开尔文智能科技有限公司',
         '珠海精实测控技术股份有限公司'
@@ -76,6 +78,15 @@
         }
     }
 
+    function setNativeInputValue(input, value) {
+        const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
+        if (setter) setter.call(input, value); else input.value = value;
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        input.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+
+    function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
+
     function getVisibleTables() {
         return Array.from(document.querySelectorAll('table')).filter(isElementVisible);
     }
@@ -88,6 +99,7 @@
             const text = (root.innerText || '').replace(/\s+/g, ' ');
             let score = 0;
             if (text.includes('商品编码')) score += 4;
+            if (text.includes('仓库')) score += 4;
             if (text.includes('数量')) score += 3;
             if (text.includes('含税单价')) score += 3;
             if (text.includes('增值税税率')) score += 2;
@@ -100,6 +112,107 @@
         return roots
             .map(root => ({ root, score: scoreRoot(root) }))
             .sort((a, b) => b.score - a.score)[0]?.root || null;
+    }
+
+    // 出入库助手：日期沿用共用面板；仓库仍按原助手的可选填充逻辑逐行处理。
+    function findWarehouseDateInput() {
+        const isDate = value => /^\d{4}-\d{2}-\d{2}$/.test((value || '').trim());
+        const labels = [...document.querySelectorAll('*')].filter(el => isElementVisible(el) && !el.closest('#jdy-final-panel') && (el.textContent || '').trim() === '单据日期');
+        for (const label of labels) {
+            let parent = label.parentElement;
+            for (let i = 0; i < 5 && parent; i++, parent = parent.parentElement) {
+                const input = [...parent.querySelectorAll('input[data-field="field"],input[type="date"],input[type="text"],input')]
+                    .find(el => isElementVisible(el) && !el.closest('#jdy-final-panel') && (isDate(el.value) || el.type === 'date'));
+                if (input) return input;
+            }
+        }
+        return [...document.querySelectorAll('input[data-field="field"],input[type="date"],input[type="text"],input')]
+            .find(el => isElementVisible(el) && !el.closest('#jdy-final-panel') && isDate(el.value)) || null;
+    }
+
+    async function fillWarehouseBillDate(value) {
+        const input = findWarehouseDateInput();
+        if (!input) { log('未找到单据日期输入框', 'error'); return false; }
+        input.click(); input.focus(); setNativeInputValue(input, value);
+        input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', keyCode: 13, bubbles: true }));
+        input.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', keyCode: 13, bubbles: true }));
+        input.blur(); await sleep(150);
+        log(`单据日期已填充为 ${value}`, 'success'); return true;
+    }
+
+    function getVisibleWarehouseCells(root) {
+        if (!root) return [];
+        const cells = [...root.querySelectorAll('td[data-code="stockid"],td[data-code="billstockid"],td[data-code="storeid"]')]
+            .filter(cell => isElementVisible(cell) && cell.classList.contains('editable-cell') && isElementVisible(cell.closest('tr')) && cell.closest('tr')?.querySelector('td[data-code="materialid"]'));
+        const byRow = new Map();
+        for (const cell of cells) { const key = cell.getAttribute('data-rowindex') || String(byRow.size); if (!byRow.has(key)) byRow.set(key, cell); }
+        return [...byRow.values()];
+    }
+
+    function findWarehouseEditor(cell) {
+        const rect = cell.getBoundingClientRect();
+        const near = input => { const r = input.getBoundingClientRect(); return Math.abs(r.top - rect.top) <= 40 && r.left >= rect.left - 20 && r.right <= rect.right + 120; };
+        const focused = document.activeElement;
+        if (focused?.tagName === 'INPUT' && isElementVisible(focused) && near(focused)) return focused;
+        const inner = cell.querySelector('input,textarea'); if (inner && isElementVisible(inner)) return inner;
+        return [...document.querySelectorAll('input[type="text"],input:not([type]),textarea')].find(input => isElementVisible(input) && near(input) && input.getBoundingClientRect().width <= rect.width + 40) || null;
+    }
+
+    async function fillWarehouseCell(cell, value, rowNo) {
+        cell.click(); cell.querySelector('.kd-table-cell-basedata-container,div,span')?.click();
+        for (let i = 0; i < 12; i++) {
+            await sleep(80); const input = findWarehouseEditor(cell); if (!input) continue;
+            input.focus(); setNativeInputValue(input, value); await sleep(60);
+            input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', keyCode: 13, bubbles: true }));
+            input.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', keyCode: 13, bubbles: true }));
+            input.blur(); await sleep(120); log(`第${rowNo}行仓库已填充为 ${value}`, 'success'); return true;
+        }
+        log(`第${rowNo}行仓库未找到可编辑输入框`, 'error'); return false;
+    }
+
+    async function fillWarehouse(value) {
+        const root = getActiveKdTableRoot(); if (!root) { log('未找到当前单据的商品表格', 'error'); return { total: 0, success: 0 }; }
+        const cells = getVisibleWarehouseCells(root); if (!cells.length) { log('未找到仓库列单元格', 'error'); return { total: 0, success: 0 }; }
+        let success = 0; for (let i = 0; i < cells.length; i++) if (await fillWarehouseCell(cells[i], value, i + 1)) success++;
+        return { total: cells.length, success };
+    }
+
+    function findWarehouseActionButton(label) {
+        return [...document.querySelectorAll('button,[role="button"],span,div')]
+            .filter(el => isElementVisible(el) && !el.closest('#jdy-final-panel') && (el.textContent || '').trim() === label)
+            .map(el => el.closest('button,[role="button"]') || el).find(el => isElementVisible(el) && !el.disabled) || null;
+    }
+
+    async function handleWarehouseAudit() {
+        const alreadyAudited = [...document.querySelectorAll('*')].some(el => isElementVisible(el) && !el.closest('#jdy-final-panel') && (el.textContent || '').trim() === '反审核');
+        if (alreadyAudited) { log('当前单据已是已审核状态，跳过审核'); return { clicked: false, skipped: true }; }
+        const button = findWarehouseActionButton('审核');
+        if (!button) { log('未找到审核按钮', 'error'); return { clicked: false, skipped: false }; }
+        button.click(); await sleep(30); log('已自动点击审核按钮', 'success'); return { clicked: true, skipped: false };
+    }
+
+    async function runWarehouseFill() {
+        const dateValue = document.getElementById('input-date').value || getTodayDate();
+        const enabled = document.getElementById('input-warehouse-enabled').checked;
+        const value = document.getElementById('input-warehouse').value.trim();
+        if (enabled && !value) throw new Error('请先输入仓库名称');
+        const button = document.getElementById('btn-warehouse-fill'); button.disabled = true;
+        try {
+            log(`当前单据：${detectWarehouseBillType()}`, 'info');
+            const dateOk = await fillWarehouseBillDate(dateValue);
+            const warehouseResult = enabled ? await fillWarehouse(value) : { total: 0, success: 0, skipped: true };
+            if (!enabled) log('已跳过仓库填充', 'info');
+            const audit = await handleWarehouseAudit();
+            log(`填充完成：单据 ${detectWarehouseBillType()} / 日期 ${dateOk ? '✓' : '✗'} / 仓库 ${enabled ? `${warehouseResult.success}/${warehouseResult.total}` : '已跳过'} / 审核 ${audit.clicked ? '已点击' : audit.skipped ? '已跳过' : '未找到'}`, warehouseResult.success > 0 || warehouseResult.skipped || dateOk ? 'success' : 'error');
+            return { success: dateOk, warehouse: warehouseResult, audit };
+        } finally { button.disabled = false; }
+    }
+
+    function detectWarehouseBillType() {
+        for (const name of ['采购入库单', '销售出库单', '销售入库单']) {
+            if ([...document.querySelectorAll('*')].some(el => isElementVisible(el) && (el.textContent || '').trim() === name)) return name;
+        }
+        return '出入库单';
     }
 
     // 获取今天的日期（格式：YYYY-MM-DD）
@@ -464,6 +577,10 @@
                         <span>💰</span>
                         <span>销售订单</span>
                     </button>
+                    <button class="type-btn" id="btn-warehouse">
+                        <span>🏭</span>
+                        <span>出入库</span>
+                    </button>
                 </div>
 
                 <div class="final-section">
@@ -498,7 +615,16 @@
                         <button class="final-btn btn-refresh" id="btn-prev-order" type="button" disabled>上一单</button>
                         <button class="final-btn btn-refresh" id="btn-next-order" type="button" disabled>下一单</button>
                     </div>
-                    <div class="final-hint">💡 切换只载入编码、数量和单价，不会自动填充金蝶页面</div>
+                    <div class="final-hint">💡 切换只载入队列数据和日期，不会自动填充金蝶页面</div>
+                </div>
+
+                <div class="final-section" id="section-warehouse" style="display:none;">
+                    <div class="final-label"><span>🏬</span><span>仓库</span></div>
+                    <label style="display:flex;align-items:center;gap:8px;margin-bottom:8px;font-size:12px;cursor:pointer;">
+                        <input type="checkbox" id="input-warehouse-enabled"><span>自动填充仓库</span>
+                    </label>
+                    <input type="text" class="final-date-input" id="input-warehouse" value="01" placeholder="仓库名称或编号">
+                    <div class="final-hint">默认只填单据日期；勾选后才填仓库。支持采购入库、销售出库、销售入库。</div>
                 </div>
 
                 <div class="final-section" id="section-codes">
@@ -599,6 +725,9 @@
                         <span>🗑️</span>
                         <span>清空</span>
                     </button>
+                </div>
+                <div class="final-buttons" id="warehouse-actions" style="display:none;grid-template-columns:1fr;">
+                    <button class="final-btn btn-fill" id="btn-warehouse-fill" type="button"><span>🚀</span><span>自动填充</span></button>
                 </div>
                 <div class="final-buttons" style="margin-top:8px; grid-template-columns:1fr 1fr;">
                     <button class="final-btn btn-order-action" id="btn-new-order" type="button">➕ 新建单据</button>
@@ -918,6 +1047,7 @@
         if (action === 'paste-quantity-price') return pastePurchaseData();
         if (action === 'paste-price') return pasteToPrice();
         if (action === 'smart-fill') return smartFillData();
+        if (action === 'warehouse-fill') return runWarehouseFill();
         if (action === 'repair') return runRepairCellsOnly();
         if (action === 'check-amount') return checkDealAmount();
         if (action === 'clear') return clearData();
@@ -2823,8 +2953,25 @@
 
     // 切换订单类型
     function switchOrderType(type) {
-        if (!['purchase', 'sales'].includes(type)) throw new Error(`不支持的订单类型：${type}`);
+        if (!['purchase', 'sales', 'warehouse'].includes(type)) throw new Error(`不支持的订单类型：${type}`);
         orderType = type;
+        const warehouseMode = type === 'warehouse';
+        const modeIds = { purchase: 'btn-purchase', sales: 'btn-sales', warehouse: 'btn-warehouse' };
+        for (const [mode, id] of Object.entries(modeIds)) document.getElementById(id).classList.toggle('active', mode === type);
+        document.getElementById('section-warehouse').style.display = warehouseMode ? 'block' : 'none';
+        document.getElementById('warehouse-actions').style.display = warehouseMode ? 'grid' : 'none';
+        for (const id of ['section-customer', 'section-codes', 'section-qty', 'amount-check-section']) {
+            const el = document.getElementById(id);
+            if (el) el.style.display = warehouseMode ? 'none' : (id === 'section-customer' ? (type === 'sales' ? 'block' : 'none') : '');
+        }
+        const priceSection = document.getElementById('input-price')?.closest('.final-section');
+        if (priceSection) priceSection.style.display = warehouseMode ? 'none' : '';
+        for (const id of ['btn-fill', 'btn-repair-cells', 'btn-paste-purchase', 'btn-refresh', 'btn-help', 'btn-paste', 'btn-clear', 'btn-new-order', 'btn-audit-order', 'btn-auto-run']) {
+            const el = document.getElementById(id); if (el) el.style.display = warehouseMode ? 'none' : '';
+        }
+        document.getElementById('btn-fill-codes').closest('.final-section').style.display = warehouseMode ? 'none' : (type === 'sales' ? 'none' : '');
+        document.getElementById('btn-paste-codes').style.display = type === 'sales' || warehouseMode ? 'none' : '';
+        if (warehouseMode) { log('切换到出入库模式（队列日期 + 可选仓库填充）', 'info'); return { success: true, orderType: type }; }
         if (sourceOrderIndex >= 0) {
             const lines = sourceOrders[sourceOrderIndex].lines || [];
             document.getElementById('input-price').value = lines.map(line => {
@@ -2833,8 +2980,6 @@
             }).join('\n');
             updateExpectedTotalUI();
         }
-        const btnPurchase = document.getElementById('btn-purchase');
-        const btnSales = document.getElementById('btn-sales');
         const sectionQty = document.getElementById('section-qty');
         const sectionCodes = document.getElementById('section-codes');
         const sectionCustomer = document.getElementById('section-customer');
@@ -2842,8 +2987,6 @@
         const btnPastePurchase = document.getElementById('btn-paste-purchase');
 
         if (type === 'purchase') {
-            btnPurchase.classList.add('active');
-            btnSales.classList.remove('active');
             sectionQty.style.display = 'block';
             if (sectionCodes) sectionCodes.style.display = 'block';
             sectionCustomer.style.display = 'none';
@@ -2851,8 +2994,6 @@
             btnPastePurchase.style.display = 'block';
             log('切换到采购订单模式（编码+数量+含税单价）', 'info');
         } else {
-            btnPurchase.classList.remove('active');
-            btnSales.classList.add('active');
             sectionQty.style.display = 'none';
             if (sectionCodes) sectionCodes.style.display = 'none';
             sectionCustomer.style.display = 'block';
@@ -2937,6 +3078,10 @@
     document.getElementById('btn-fill-codes').addEventListener('click', fillCodesFromTextarea);
     document.getElementById('btn-purchase').addEventListener('click', () => switchOrderType('purchase'));
     document.getElementById('btn-sales').addEventListener('click', () => switchOrderType('sales'));
+    document.getElementById('btn-warehouse').addEventListener('click', () => switchOrderType('warehouse'));
+    document.getElementById('input-warehouse-enabled').addEventListener('change', e => { warehouseAutofillEnabled = e.target.checked; log(e.target.checked ? '已开启自动填充仓库' : '已关闭自动填充仓库', 'info'); });
+    document.getElementById('input-warehouse').addEventListener('input', e => { warehouseValue = e.target.value; });
+    document.getElementById('btn-warehouse-fill').addEventListener('click', () => runWarehouseFill().catch(e => log(`填充失败：${e.message}`, 'error')));
 
     // 设置初始状态
     switchOrderType('purchase');
