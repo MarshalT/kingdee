@@ -980,9 +980,9 @@
         if (sourceOrders.length === 0 || sourceOrderIndex < 0) throw new Error('请先读取订单队列');
         if (!['purchase', 'sales'].includes(orderType)) throw new Error('当前订单类型不支持自动录入');
         const formId = [...document.querySelectorAll('[data-form-id]')].find(el => el.getClientRects().length > 0 && getComputedStyle(el).visibility !== 'hidden')?.getAttribute('data-form-id') || '';
-        if (!/pur_bill_order|sal_bill_order|purchase.*order|sales.*order/i.test(formId)) {
-            throw new Error('请先打开金蝶采购订单或销售订单录入界面，再启动自动录入');
-        }
+        // if (!/pur_bill_order|sal_bill_order|purchase.*order|sales.*order/i.test(formId)) {
+        //     throw new Error('请先打开金蝶采购订单或销售订单录入界面，再启动自动录入');
+        // }
         const accepted = confirm('将从队列第 ' + (sourceOrderIndex + 1) + '/' + sourceOrders.length + ' 单开始自动录入。每单依次填编码、智能填充、核对金额；金额一致才审核，审核完成后新建并载入下一单。遇到任何错误会暂停。启动后请保持页面打开。继续？');
         if (!accepted) return { started: false, cancelled: true };
         autoRunActive = true;

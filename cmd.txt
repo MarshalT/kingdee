@@ -3,3 +3,7 @@ path/to/venv/bin/python kingdee-prepare-queue.py "6月订单1.1.xlsx" \
   --manifest "/tmp/kingdee-manifest.json" \
   --out-dir "/tmp/clipserve" \
   --serve
+
+
+
+py kingdee-prepare-queue.py "6月订单1.1.xlsx" --queue "$env:TEMP\kingdee-queue.json" --manifest "$env:TEMP\kingdee-manifest.json" --out-dir "$env:TEMP\clipserve" --serve
