@@ -49,6 +49,7 @@
     };
 
     let isFilling = false;
+    let autoRunActive = false;
     let sourceOrders = [];
     let sourceOrderIndex = -1;
     let gridApi = null;
@@ -431,6 +432,8 @@
                 }
                 .btn-order-action { background: #fff3e0; color: #7a3e00; border: 1px solid #ffcc80; }
                 .btn-audit-action { background: #ffebee; color: #b71c1c; border: 1px solid #ef9a9a; }
+                .btn-auto-run { background: linear-gradient(135deg,#11998e,#38ef7d); color:#062b22; font-weight:bold; }
+                .btn-auto-stop { background:#7f1d1d; color:#fff; }
                 @media (max-width: 520px) {
                     #jdy-final-panel { left: 8px; right: 8px; top: 8px; width: auto; max-height: calc(100vh - 16px); }
                     .final-content { padding: 12px; }
@@ -600,6 +603,9 @@
                 <div class="final-buttons" style="margin-top:8px; grid-template-columns:1fr 1fr;">
                     <button class="final-btn btn-order-action" id="btn-new-order" type="button">➕ 新建单据</button>
                     <button class="final-btn btn-audit-action" id="btn-audit-order" type="button">✅ 审核单据</button>
+                </div>
+                <div class="final-buttons" style="margin-top:8px; grid-template-columns:1fr;">
+                    <button class="final-btn btn-auto-run" id="btn-auto-run" type="button">▶️ 启动自动录入全队列</button>
                 </div>
 
                 <div class="final-section" id="progress-section" style="display:none;">
@@ -917,6 +923,8 @@
         if (action === 'clear') return clearData();
         if (action === 'refresh') return detectRows();
         if (action === 'new-order') return clickKingdeeAction('new');
+        if (action === 'auto-run') return startAutoRun();
+        if (action === 'auto-stop') { stopAutoRun('收到停止命令'); return { stopped: true }; }
         if (action === 'audit') {
             const amount = checkDealAmount();
             if (!amount || amount.consistent !== true) throw new Error(`金额未核对一致，已阻止审核（预期 ${amount?.expected ?? '—'}，页面 ${amount?.deal ?? '—'}，差额 ${amount?.difference ?? '—'}）`);
@@ -939,6 +947,97 @@
         candidates[0].click();
         log('已点击金蝶“' + config.label + '”；如页面弹出确认窗口，请在金蝶页面完成确认。', 'info');
         return { clicked: true, action: config.label, selector: config.selector };
+    }
+
+    function getCurrentBillNo() {
+        const input = document.querySelector('#billno input');
+        return input ? String(input.value || '').trim() : '';
+    }
+
+    function waitForCondition(check, timeoutMs, intervalMs = 250) {
+        return new Promise(resolve => {
+            const deadline = Date.now() + timeoutMs;
+            const poll = () => {
+                let value = false;
+                try { value = check(); } catch (_) {}
+                if (value) return resolve(value);
+                if (Date.now() >= deadline) return resolve(false);
+                setTimeout(poll, intervalMs);
+            };
+            poll();
+        });
+    }
+
+    function stopAutoRun(reason) {
+        autoRunActive = false;
+        const button = document.getElementById('btn-auto-run');
+        if (button) { button.disabled = false; button.textContent = '▶️ 启动自动录入全队列'; button.classList.remove('btn-auto-stop'); }
+        if (reason) log('自动录入已停止：' + reason, 'warn');
+    }
+
+    async function startAutoRun() {
+        if (autoRunActive) { stopAutoRun('用户手动停止'); return { stopped: true }; }
+        if (sourceOrders.length === 0 || sourceOrderIndex < 0) throw new Error('请先读取订单队列');
+        if (!['purchase', 'sales'].includes(orderType)) throw new Error('当前订单类型不支持自动录入');
+        const formId = document.querySelector('[data-form-id]')?.getAttribute('data-form-id') || '';
+        if (!/pur_bill_order|sal_bill_order|purchase.*order|sales.*order/i.test(formId)) {
+            throw new Error('请先打开金蝶采购订单或销售订单录入界面，再启动自动录入');
+        }
+        const accepted = confirm('将从队列第 ' + (sourceOrderIndex + 1) + '/' + sourceOrders.length + ' 单开始自动录入。每单依次填编码、智能填充、核对金额；金额一致才审核，审核完成后新建并载入下一单。遇到任何错误会暂停。启动后请保持页面打开。继续？');
+        if (!accepted) return { started: false, cancelled: true };
+        autoRunActive = true;
+        const button = document.getElementById('btn-auto-run');
+        if (button) { button.textContent = '⏹ 停止自动录入'; button.classList.add('btn-auto-stop'); }
+        const startIndex = sourceOrderIndex;
+        log('开始自动录入：从队列第 ' + (startIndex + 1) + '/' + sourceOrders.length + ' 单开始', 'info');
+        try {
+            for (let index = startIndex; index < sourceOrders.length && autoRunActive; index++) {
+                if (sourceOrderIndex !== index) {
+                    const loaded = loadSourceOrder(index);
+                    if (!loaded.success) throw new Error(loaded.error || '载入订单失败');
+                }
+                const order = sourceOrders[index];
+                log('自动录入 ' + (index + 1) + '/' + sourceOrders.length + '：' + order.orderNo + ' / ' + order.supplier, 'info');
+                const codeOk = await fillCodesFromTextarea();
+                if (!autoRunActive) break;
+                if (codeOk !== true) throw new Error('订单 ' + order.orderNo + ' 编码未全部填充成功，已暂停');
+                const fillResult = await smartFillData();
+                if (!autoRunActive) break;
+                if (!fillResult?.success) throw new Error('订单 ' + order.orderNo + ' 智能填充未确认成功，已暂停');
+                const amount = checkDealAmount();
+                if (!amount || amount.consistent !== true) throw new Error('订单 ' + order.orderNo + ' 金额不一致或无法读取（预期 ' + (amount?.expected ?? '—') + '，成交 ' + (amount?.deal ?? '—') + '），已暂停');
+                const beforeAudit = getCurrentBillNo();
+                clickKingdeeAction('audit');
+                const audited = await waitForCondition(() => {
+                    const mark = [...document.querySelectorAll('[data-opk="unaudit"], [data-opk="unAudit"]')].some(el => el.getClientRects().length);
+                    const auditor = document.querySelector('[data-id="auditorid"] input');
+                    return mark || (auditor && auditor.value && auditor.value !== '-');
+                }, 12000);
+                if (!audited) throw new Error('订单 ' + order.orderNo + ' 已触发审核，但未确认完成；已暂停');
+                if (!autoRunActive) break;
+                clickKingdeeAction('new');
+                const created = await waitForCondition(() => {
+                    const billNo = getCurrentBillNo();
+                    const supplier = document.querySelector('[data-id="supplierid"] input');
+                    return billNo && billNo !== beforeAudit && supplier && !String(supplier.value || '').trim() ? { billNo } : false;
+                }, 12000);
+                if (!created) throw new Error('订单 ' + order.orderNo + ' 已点击新建，但未确认新单据；已暂停');
+                log('订单 ' + order.orderNo + ' 已审核，新单据 ' + created.billNo + ' 已就绪', 'success');
+                if (index + 1 >= sourceOrders.length) {
+                    stopAutoRun('队列已全部完成');
+                    return { completed: true, completedOrders: index - startIndex + 1 };
+                }
+                const next = loadSourceOrder(index + 1);
+                if (!next.success) throw new Error(next.error || '下一单载入失败');
+                await sleep(500);
+            }
+            return { completed: false, stopped: !autoRunActive, currentIndex: sourceOrderIndex };
+        } catch (error) {
+            stopAutoRun(error.message);
+            throw error;
+        } finally {
+            if (autoRunActive) stopAutoRun('自动流程结束');
+        }
     }
 
     let commandPollInFlight = false;
@@ -1811,7 +1910,7 @@
             alert('⚠️ 请先输入商品编码！');
             return;
         }
-        await fillCodesFromList(codes);
+        return await fillCodesFromList(codes);
     }
 
     function readNumericFromCell(td) {
@@ -2090,13 +2189,12 @@
     async function smartFillData() {
         if (!parseData()) {
             log('请先输入数据！', 'error');
-            alert('⚠️ 请先输入数据！');
-            return;
+            return { success: false, error: '没有有效的数量或单价数据' };
         }
 
         if (isFilling) {
             log('正在填充中，请勿重复操作', 'warn');
-            return;
+            return { success: false, error: '已有填充任务正在运行' };
         }
 
         gridApi = null;
@@ -2121,8 +2219,7 @@
                 log(`输入数据：单价${orderData.prices.length}条`, 'info');
                 if (orderData.prices.length === 0) {
                     log('销售订单模式需要输入含税单价数据！', 'error');
-                    alert('⚠️ 销售订单模式需要输入含税单价数据！');
-                    return;
+                    return { success: false, error: '销售订单缺少含税单价' };
                 }
             } else {
                 log(`输入数据：数量${orderData.quantities.length}条，单价${orderData.prices.length}条`, 'info');
@@ -2329,9 +2426,14 @@
                 log(`📊 数量字段：${qtySuccessCount}个，单价字段：${priceSuccessCount}个`, 'success');
             }
             log('💾 请按 Ctrl+S 保存订单', 'warn');
+            const expectedQtyFields = isSalesOrder ? 0 : Math.min(totalDataCount, filledCount);
+            const expectedPriceFields = Math.min(orderData.prices.length, filledCount);
+            const fieldsOk = (isSalesOrder || qtySuccessCount >= expectedQtyFields) && priceSuccessCount >= expectedPriceFields;
+            return { success: fieldsOk && filledCount > 0, filledCount, qtySuccessCount, priceSuccessCount, expectedQtyFields, expectedPriceFields };
         } catch (error) {
             log(`填充出错: ${error.message}`, 'error');
             alert(`❌ 填充出错：${error.message}`);
+            return { success: false, error: error.message };
         } finally {
             isFilling = false;
             setCodeFillButtonsDisabled(false);
@@ -2812,6 +2914,10 @@
     }
 
     document.getElementById('btn-fill').addEventListener('click', smartFillData);
+    document.getElementById('btn-auto-run').addEventListener('click', () => {
+        if (autoRunActive) stopAutoRun('用户手动停止');
+        else startAutoRun().catch(error => log(error.message, 'error'));
+    });
     document.getElementById('btn-new-order').addEventListener('click', () => { if (confirm('将点击金蝶“新增”并打开一张新单据。继续吗？')) executeControlCommand({ action: 'new-order' }).catch(e => log(e.message, 'error')); });
     document.getElementById('btn-audit-order').addEventListener('click', () => { if (confirm('审核会提交当前金蝶单据。请确认当前单据和金额均已核对。继续审核吗？')) executeControlCommand({ action: 'audit' }).catch(e => log(e.message, 'error')); });
     document.getElementById('btn-load-orders').addEventListener('click', requestSourceOrders);

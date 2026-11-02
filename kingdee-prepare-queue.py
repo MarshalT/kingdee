@@ -527,7 +527,7 @@ def filter_from(orders, from_order: str | None):
 
 def serve(out_dir: Path, port: int, queue_file: Path):
     control = {"pending": None, "results": {}, "next_id": 1}
-    allowed_actions = {"status", "load-orders", "next-order", "previous-order", "switch-type", "fill-codes", "paste-codes", "paste-quantity-price", "paste-price", "smart-fill", "repair", "check-amount", "clear", "refresh", "audit", "new-order"}
+    allowed_actions = {"status", "load-orders", "next-order", "previous-order", "switch-type", "fill-codes", "paste-codes", "paste-quantity-price", "paste-price", "smart-fill", "repair", "check-amount", "clear", "refresh", "audit", "new-order", "auto-run", "auto-stop"}
     class Handler(SimpleHTTPRequestHandler):
         def do_GET(self):
             if self.path.split("?", 1)[0] == "/api/jdy/command":

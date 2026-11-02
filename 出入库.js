@@ -375,13 +375,19 @@
 
     function activateBatchWarehouseButton(batchIcon) {
         const rect = batchIcon.getBoundingClientRect();
-        for (const type of ['mousedown', 'mouseup', 'click']) {
-            batchIcon.dispatchEvent(new MouseEvent(type, {
+        const targets = [batchIcon, batchIcon.parentElement, batchIcon.closest('[data-slot="tips"]')].filter(Boolean);
+        for (const target of targets) {
+            // React/金蝶的批量设置入口有版本差异：有的版本监听图标本身，
+            // 有的版本监听包裹层；两者都触发一次，避免只派发到不会处理的节点。
+            target.click?.();
+            for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']) {
+                target.dispatchEvent(new MouseEvent(type, {
                 bubbles: true, cancelable: true, composed: true, view: window,
                 button: 0, buttons: type === 'mousedown' ? 1 : 0,
                 clientX: rect.left + rect.width / 2,
                 clientY: rect.top + rect.height / 2
-            }));
+                }));
+            }
         }
     }
 
