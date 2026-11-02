@@ -979,7 +979,7 @@
         if (autoRunActive) { stopAutoRun('用户手动停止'); return { stopped: true }; }
         if (sourceOrders.length === 0 || sourceOrderIndex < 0) throw new Error('请先读取订单队列');
         if (!['purchase', 'sales'].includes(orderType)) throw new Error('当前订单类型不支持自动录入');
-        const formId = document.querySelector('[data-form-id]')?.getAttribute('data-form-id') || '';
+        const formId = [...document.querySelectorAll('[data-form-id]')].find(el => el.getClientRects().length > 0 && getComputedStyle(el).visibility !== 'hidden')?.getAttribute('data-form-id') || '';
         if (!/pur_bill_order|sal_bill_order|purchase.*order|sales.*order/i.test(formId)) {
             throw new Error('请先打开金蝶采购订单或销售订单录入界面，再启动自动录入');
         }
