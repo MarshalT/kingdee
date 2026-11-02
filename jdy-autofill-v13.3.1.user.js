@@ -860,7 +860,7 @@
                 statusEl.className = 'amount-pending';
             }
             log(`金额核对：预期=${expected.toFixed(2)}（${lines}行），页面成交金额未读到；请以页脚「本单成交金额」为准`, 'warn');
-            return false;
+            return { consistent: false, expected: Number(expected.toFixed(2)), deal: null, difference: null, lines, status: 'unread' };
         }
 
         const diff = deal - expected;
@@ -879,10 +879,56 @@
             `金额核对：预期=${expected.toFixed(2)} 成交=${deal.toFixed(2)} 差额=${diff.toFixed(2)} → ${ok ? '一致' : '不一致'}（${lines}行）`,
             ok ? 'success' : 'error'
         );
-        return ok;
+        return { consistent: ok, expected: Number(expected.toFixed(2)), deal: Number(deal.toFixed(2)), difference: Number(diff.toFixed(2)), lines, status: ok ? 'consistent' : 'mismatch' };
     }
 
     const ORDER_QUEUE_URL = 'http://127.0.0.1:8766/api/orders';
+    const CONTROL_COMMAND_URL = 'http://127.0.0.1:8766/api/jdy/command';
+    const CONTROL_RESULT_URL = 'http://127.0.0.1:8766/api/jdy/result';
+    let lastControlCommandId = 0;
+
+    function postControlResult(payload) {
+        GM_xmlhttpRequest({ method: 'POST', url: CONTROL_RESULT_URL, data: JSON.stringify(payload), headers: { 'Content-Type': 'application/json' } });
+    }
+    function controlRequest(method, url, data) {
+        return new Promise((resolve, reject) => GM_xmlhttpRequest({ method, url, data: data ? JSON.stringify(data) : undefined, headers: data ? { 'Content-Type': 'application/json' } : undefined, onload: r => r.status >= 200 && r.status < 300 ? resolve(JSON.parse(r.responseText || '{}')) : reject(new Error(`HTTP ${r.status}`)), onerror: () => reject(new Error('本地控制服务连接失败')) }));
+    }
+
+    async function executeControlCommand(command) {
+        const action = command.action;
+        if (action === 'status') return { orderIndex: sourceOrderIndex, orderCount: sourceOrders.length, orderType, order: sourceOrders[sourceOrderIndex] || null };
+        if (action === 'load-orders') return requestSourceOrders();
+        if (action === 'next-order') return loadSourceOrder(sourceOrderIndex + 1);
+        if (action === 'previous-order') return loadSourceOrder(sourceOrderIndex - 1);
+        if (action === 'switch-type') return switchOrderType(command.type || 'purchase');
+        if (action === 'fill-codes') return fillCodesFromTextarea();
+        if (action === 'paste-codes') return pasteCodes();
+        if (action === 'paste-quantity-price') return pastePurchaseData();
+        if (action === 'paste-price') return pasteToPrice();
+        if (action === 'smart-fill') return smartFillData();
+        if (action === 'repair') return runRepairCellsOnly();
+        if (action === 'check-amount') return checkDealAmount();
+        if (action === 'clear') return clearData();
+        if (action === 'refresh') return detectRows();
+        throw new Error(`未知接口动作：${action}`);
+    }
+
+    let commandPollInFlight = false;
+    function pollControlCommand() {
+        if (commandPollInFlight) return;
+        commandPollInFlight = true;
+        GM_xmlhttpRequest({ method: 'GET', url: CONTROL_COMMAND_URL, timeout: 5000, onload: response => {
+            try {
+                const command = JSON.parse(response.responseText || '{}');
+                if (!command.id || command.id <= lastControlCommandId) { commandPollInFlight = false; return; }
+                lastControlCommandId = command.id;
+                Promise.resolve(executeControlCommand(command)).then(data => postControlResult({ id: command.id, action: command.action, success: true, data: data ?? null })).catch(error => postControlResult({ id: command.id, action: command.action, success: false, error: error.message }));
+            } catch (error) { /* 保持人工按钮可用 */ }
+            commandPollInFlight = false;
+        }, onerror: () => { commandPollInFlight = false; }, ontimeout: () => { commandPollInFlight = false; }});
+    }
+
+    window.jdyAssistant = { execute: executeControlCommand, status: () => ({ orderIndex: sourceOrderIndex, orderCount: sourceOrders.length, orderType }) };
     function updateSourceOrderStatus(message) {
         const el = document.getElementById('source-order-status'); if (el) el.textContent = message;
         const prev = document.getElementById('btn-prev-order'); const next = document.getElementById('btn-next-order');
@@ -890,7 +936,7 @@
         if (next) next.disabled = sourceOrderIndex < 0 || sourceOrderIndex >= sourceOrders.length - 1;
     }
     function loadSourceOrder(index) {
-        if (index < 0 || index >= sourceOrders.length) return;
+        if (index < 0 || index >= sourceOrders.length) return { success: false, error: '订单索引超出队列范围', index, orderCount: sourceOrders.length };
         const order = sourceOrders[index]; const lines = Array.isArray(order.lines) ? order.lines : [];
         document.getElementById('input-date').value = order.date || savedDate; savedDate = order.date || savedDate;
         document.getElementById('source-order-meta').textContent = `供应商：${order.supplier || '—'} · 供应商结算价格：${order.settlementPrice ?? '—'}`;
@@ -906,14 +952,15 @@
             : `预期 ${order.expectedTotal ?? '—'} · 供应商结算价格 ${order.settlementPrice ?? '—'}`;
         updateSourceOrderStatus(`第 ${index + 1}/${sourceOrders.length} 单：${order.orderNo} · ${order.supplier} · ${order.date || '—'} · ${expectedLabel}`);
         log(`已载入队列第 ${index + 1} 单：${order.orderNo} / ${order.supplier}（${lines.length} 行）`, 'success');
+        return { success: true, index, orderCount: sourceOrders.length, orderNo: order.orderNo, supplier: order.supplier, date: order.date, lines: lines.length, expectedTotal: order.expectedTotal, settlementPrice: order.settlementPrice, salesLineTotal: order.salesLineTotal, salesTotal: order.salesTotal };
     }
     function requestSourceOrders() {
         updateSourceOrderStatus('正在读取本地订单队列…');
-        GM_xmlhttpRequest({method:'GET', url:ORDER_QUEUE_URL, timeout:10000,
-            onload: response => { try { if (response.status < 200 || response.status >= 300) throw new Error(`HTTP ${response.status}`); const orders=JSON.parse(response.responseText); if (!Array.isArray(orders) || !orders.length) throw new Error('队列为空或格式不正确'); sourceOrders=orders; loadSourceOrder(0); } catch(e) { updateSourceOrderStatus(`读取失败：${e.message}`); log(`读取本地订单队列失败：${e.message}`,'error'); } },
-            onerror: () => { updateSourceOrderStatus('连接失败，请先启动本地订单服务'); log('无法连接本地订单服务（127.0.0.1:8766）','error'); },
-            ontimeout: () => { updateSourceOrderStatus('连接超时，请确认本地订单服务正在运行'); log('读取本地订单队列超时','error'); }
-        });
+        return new Promise((resolve, reject) => GM_xmlhttpRequest({method:'GET', url:ORDER_QUEUE_URL, timeout:10000,
+            onload: response => { try { if (response.status < 200 || response.status >= 300) throw new Error(`HTTP ${response.status}`); const orders=JSON.parse(response.responseText); if (!Array.isArray(orders) || !orders.length) throw new Error('队列为空或格式不正确'); sourceOrders=orders; resolve(loadSourceOrder(0)); } catch(e) { updateSourceOrderStatus(`读取失败：${e.message}`); log(`读取本地订单队列失败：${e.message}`,'error'); reject(e); } },
+            onerror: () => { updateSourceOrderStatus('连接失败，请先启动本地订单服务'); log('无法连接本地订单服务（127.0.0.1:8766）','error'); reject(new Error('无法连接本地订单服务')); },
+            ontimeout: () => { updateSourceOrderStatus('连接超时，请确认本地订单服务正在运行'); log('读取本地订单队列超时','error'); reject(new Error('读取订单队列超时')); }
+        }));
     }
 
     // 解析数据
@@ -2594,6 +2641,7 @@
 
     // 切换订单类型
     function switchOrderType(type) {
+        if (!['purchase', 'sales'].includes(type)) throw new Error(`不支持的订单类型：${type}`);
         orderType = type;
         if (sourceOrderIndex >= 0) {
             const lines = sourceOrders[sourceOrderIndex].lines || [];
@@ -2630,6 +2678,7 @@
             btnPastePurchase.style.display = 'none';
             log('切换到销售订单模式（仅含税单价）', 'info');
         }
+        return { success: true, orderType: type };
     }
 
     // 初始化
@@ -2705,6 +2754,8 @@
     switchOrderType('purchase');
     updateExpectedTotalUI();
     requestSourceOrders();
+    pollControlCommand();
+    setInterval(pollControlCommand, 900);
 
     // 检测API并初始化
     const api = getGridApi();

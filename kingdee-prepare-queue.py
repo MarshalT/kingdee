@@ -19,6 +19,7 @@ import argparse
 import json
 import re
 import sys
+import urllib.parse
 from datetime import date, datetime
 from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 from pathlib import Path
@@ -347,8 +348,19 @@ def filter_from(orders, from_order: str | None):
 
 
 def serve(out_dir: Path, port: int, queue_file: Path):
+    control = {"pending": None, "results": {}, "next_id": 1}
     class Handler(SimpleHTTPRequestHandler):
         def do_GET(self):
+            if self.path.split("?", 1)[0] == "/api/jdy/command":
+                payload = json.dumps(control["pending"] or {}, ensure_ascii=False).encode()
+                self.send_response(200); self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Content-Length", str(len(payload))); self.send_header("Access-Control-Allow-Origin", "*"); self.end_headers(); self.wfile.write(payload); return
+            if self.path.split("?", 1)[0] == "/api/jdy/result":
+                query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+                result_id = query.get("id", [None])[0]
+                payload = json.dumps(control["results"].get(str(result_id), {}) if result_id else (next(reversed(control["results"].values()), {}) if control["results"] else {}), ensure_ascii=False).encode()
+                self.send_response(200); self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Content-Length", str(len(payload))); self.send_header("Access-Control-Allow-Origin", "*"); self.end_headers(); self.wfile.write(payload); return
             if self.path.split("?", 1)[0] == "/api/orders":
                 try:
                     payload = queue_file.read_bytes()
@@ -365,6 +377,26 @@ def serve(out_dir: Path, port: int, queue_file: Path):
                 return
             super().do_GET()
 
+        def do_POST(self):
+            path = self.path.split("?", 1)[0]
+            if path in ("/api/jdy/command", "/api/jdy/result"):
+                length = int(self.headers.get("Content-Length", "0"))
+                try: body = json.loads(self.rfile.read(length) or b"{}")
+                except json.JSONDecodeError: self.send_error(400, "JSON格式错误"); return
+                if path.endswith("/command"):
+                    body["id"] = control["next_id"]; control["next_id"] += 1; control["pending"] = body
+                    response = {"accepted": True, "id": body["id"]}
+                else:
+                    result_id = str(body.get("id", ""))
+                    if result_id:
+                        control["results"][result_id] = body
+                        if control["pending"] and str(control["pending"].get("id")) == result_id:
+                            control["pending"] = None
+                    response = {"ok": True}
+                payload = json.dumps(response, ensure_ascii=False).encode()
+                self.send_response(200); self.send_header("Content-Type", "application/json; charset=utf-8"); self.send_header("Content-Length", str(len(payload))); self.send_header("Access-Control-Allow-Origin", "*"); self.end_headers(); self.wfile.write(payload); return
+            self.send_error(404)
+
         def __init__(self, *a, **k):
             super().__init__(*a, directory=str(out_dir), **k)
 
@@ -375,6 +407,7 @@ def serve(out_dir: Path, port: int, queue_file: Path):
     print(f"clipserve: http://127.0.0.1:{port}/  (目录 {out_dir})")
     print("首页: http://127.0.0.1:%d/index.html" % port)
     print(f"订单接口: http://127.0.0.1:{port}/api/orders")
+    print(f"AI控制接口: POST http://127.0.0.1:{port}/api/jdy/command  (例如 {{\"action\":\"next-order\"}})")
     print("Ctrl+C 停止")
     try:
         httpd.serve_forever()
