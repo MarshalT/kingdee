@@ -2127,6 +2127,8 @@
             await applyDocumentDate();
             if (isSalesOrder) {
                 await applySalesCustomer();
+            } else {
+                await applyQueueSupplier();
             }
 
             let filledCount = 0;
@@ -2464,6 +2466,56 @@
             log(`❌ 客户填充失败：${error.message}`, 'error');
             return false;
         }
+    }
+
+    async function applyQueueSupplier() {
+        const supplierName = String(sourceOrders[sourceOrderIndex]?.supplier || '').trim();
+        if (!supplierName) {
+            log('⚠️ 当前队列单没有供应商名称，跳过供应商填充', 'warn');
+            return false;
+        }
+        // Kingdee uses data-id="supplierid" for the purchase supplier selector;
+        // searching by nearby label text can fail because the label and editor
+        // live in separate layout containers.
+        let supplierInput = document.querySelector('[data-id="supplierid"] input');
+        if (!supplierInput || !isElementVisible(supplierInput) || supplierInput.readOnly || supplierInput.disabled) {
+            const supplierLabel = [...document.querySelectorAll('*')].find(el =>
+                el.children.length === 0 && (el.textContent || '').trim() === '供应商'
+            );
+            let parent = supplierLabel?.parentElement || null;
+            for (let i = 0; i < 6 && parent && !supplierInput; i++, parent = parent.parentElement) {
+                supplierInput = [...parent.querySelectorAll('input[type="text"], input[data-field="field"], input')]
+                    .find(input => isElementVisible(input) && !input.readOnly && !input.disabled) || null;
+            }
+        }
+        if (!supplierInput) {
+            log('❌ 未找到供应商输入框，未能填充供应商', 'error');
+            return false;
+        }
+        supplierInput.click();
+        supplierInput.focus();
+        const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+        setter.call(supplierInput, supplierName);
+        supplierInput.dispatchEvent(new Event('input', { bubbles: true }));
+        supplierInput.dispatchEvent(new Event('change', { bubbles: true }));
+        await new Promise(resolve => setTimeout(resolve, 400));
+        const options = [...document.querySelectorAll('[role="option"], li, .ant-select-item, [class*="option"], [class*="Option"]')]
+            .filter(el => isElementVisible(el) && (el.textContent || '').trim() === supplierName);
+        if (options.length === 1) {
+            options[0].click();
+            await new Promise(resolve => setTimeout(resolve, 150));
+            log('✅ 已选择供应商：' + supplierName, 'success');
+            return true;
+        }
+        supplierInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', keyCode: 13, bubbles: true }));
+        supplierInput.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', keyCode: 13, bubbles: true }));
+        await new Promise(resolve => setTimeout(resolve, 150));
+        if (String(supplierInput.value || '').trim() === supplierName) {
+            log('✅ 供应商已填入：' + supplierName, 'success');
+            return true;
+        }
+        log('⚠️ 已输入供应商“' + supplierName + '”，但未确认下拉选择，请检查供应商是否已绑定', 'warn');
+        return false;
     }
 
     // 帮助

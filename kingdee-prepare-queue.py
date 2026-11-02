@@ -20,6 +20,8 @@ import json
 import re
 import sys
 import urllib.parse
+import zipfile
+import xml.etree.ElementTree as ET
 from datetime import date, datetime
 from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 from pathlib import Path
@@ -142,6 +144,78 @@ def read_excel(path: Path):
     return out
 
 
+def read_supplier_names(path: Path):
+    """读取金蝶供应商导出表中的供应商名称列。"""
+    wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+    names = set()
+    for ws in wb.worksheets:
+        rows = ws.iter_rows(values_only=True)
+        for header in rows:
+            columns = {str(value).strip(): i for i, value in enumerate(header) if value is not None}
+            if "供应商名称" in columns:
+                name_i = columns["供应商名称"]
+                names.update(str(value).strip() for row in rows if len(row) > name_i
+                             if (value := _cell(row[name_i])) is not None and str(value).strip())
+                break
+    wb.close()
+    # 金蝶导出表使用 inlineStr；部分 openpyxl 版本会把这类表误读成只有 A1。
+    # 若工作表 API 未返回数据，直接读取 XLSX XML 并按表头名取列。
+    if not names:
+        ns = {"m": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
+        with zipfile.ZipFile(path) as archive:
+            shared = []
+            if "xl/sharedStrings.xml" in archive.namelist():
+                strings_root = ET.fromstring(archive.read("xl/sharedStrings.xml"))
+                shared = ["".join(t.text or "" for t in item.findall(".//m:t", ns))
+                          for item in strings_root.findall("m:si", ns)]
+            for filename in archive.namelist():
+                if not re.fullmatch(r"xl/worksheets/sheet\d+\.xml", filename):
+                    continue
+                root = ET.fromstring(archive.read(filename))
+                xml_rows = root.findall(".//m:sheetData/m:row", ns)
+                for row_index, row in enumerate(xml_rows):
+                    values = {}
+                    for cell in row.findall("m:c", ns):
+                        ref = cell.attrib.get("r", "")
+                        col = re.match(r"[A-Z]+", ref)
+                        if not col:
+                            continue
+                        inline = cell.find("m:is", ns)
+                        value = "".join(t.text or "" for t in inline.findall(".//m:t", ns)) if inline is not None else ""
+                        raw = cell.find("m:v", ns)
+                        if not value and raw is not None:
+                            value = raw.text or ""
+                            if cell.attrib.get("t") == "s" and value:
+                                value = shared[int(value)]
+                        values[col.group()] = value.strip()
+                    header_col = next((col for col, value in values.items() if value == "供应商名称"), None)
+                    if header_col:
+                        for data_row in xml_rows[row_index + 1:]:
+                            for cell in data_row.findall("m:c", ns):
+                                if re.match(r"[A-Z]+", cell.attrib.get("r", "")).group() != header_col:
+                                    continue
+                                inline = cell.find("m:is", ns)
+                                value = "".join(t.text or "" for t in inline.findall(".//m:t", ns)) if inline is not None else ""
+                                raw = cell.find("m:v", ns)
+                                if not value and raw is not None:
+                                    value = raw.text or ""
+                                    if cell.attrib.get("t") == "s" and value:
+                                        value = shared[int(value)]
+                                if value.strip():
+                                    names.add(value.strip())
+                        break
+                if names:
+                    break
+    if not names:
+        raise SystemExit(f"供应商表缺少「供应商名称」列或该列没有数据：{path}")
+    return names
+
+
+def find_unmatched_suppliers(orders, supplier_names):
+    """在分单完成后，按分单名称精确核对供应商表。"""
+    return [order for order in orders if str(order.get("supplier") or "").strip() not in supplier_names]
+
+
 def split_orders(rows):
     """按 (订单号, 供应商) 保序分组。"""
     groups = []
@@ -223,7 +297,7 @@ def html_combined_page(title: str, paste_body: str, codes_body: str, next_url: s
 """
 
 
-def write_clip_pages(orders, out_dir: Path, index_base: int = 0):
+def write_clip_pages(orders, out_dir: Path, index_base: int = 0, unmatched_suppliers=None):
     out_dir.mkdir(parents=True, exist_ok=True)
     written = []
     for i, o in enumerate(orders):
@@ -270,7 +344,7 @@ def write_clip_pages(orders, out_dir: Path, index_base: int = 0):
     links = [
         "<!DOCTYPE html><meta charset=utf-8><title>clipserve index</title>",
         "<style>body{font-family:Arial,sans-serif;margin:24px} .page-title{display:flex;align-items:center;gap:24px} .page-title h1{margin:0} .audit-link{font-size:20px;padding:10px 16px;border:1px solid #1677ff;border-radius:8px;background:#eef6ff;text-decoration:none} li{margin:8px 0}</style>",
-        "<div class='page-title'><h1>录单复制页</h1><a class='audit-link' href='price-differences.html'>价格差异清单</a><a class='audit-link' href='empty-codes.html'>商品编码为空</a></div><ol>",
+        "<div class='page-title'><h1>录单复制页</h1><a class='audit-link' href='price-differences.html'>价格差异清单</a><a class='audit-link' href='empty-codes.html'>商品编码为空</a><a class='audit-link' href='unmatched-suppliers.html'>供应商未匹配</a></div><ol>",
     ]
     for o in orders:
         links.append(
@@ -342,6 +416,23 @@ def write_clip_pages(orders, out_dir: Path, index_base: int = 0):
         empty_codes.append("</tbody></table>")
     empty_codes.append("</body></html>")
     (out_dir / "empty-codes.html").write_text("\n".join(empty_codes), encoding="utf-8")
+
+    unmatched_suppliers = unmatched_suppliers or []
+    missing = [
+        "<!DOCTYPE html><html><head><meta charset='utf-8'><title>供应商未匹配</title>",
+        "<style>body{font-family:Arial,sans-serif;margin:24px;color:#222}a{color:#1677ff}h1{margin-bottom:8px}.hint{color:#666;margin:0 0 20px}table{border-collapse:collapse;width:100%;margin:16px 0}th,td{border:1px solid #ddd;padding:9px 12px;text-align:left}th{background:#fff3e0}.empty{padding:12px;color:#388e3c;background:#f1f8e9}</style></head><body>",
+        "<p><a href='index.html'>← 返回录单复制页</a></p><h1>供应商未匹配</h1>",
+        f"<p class='hint'>分单完成后按供应商名称与供应商导出表精确匹配；共发现 {len(unmatched_suppliers)} 张未匹配订单。</p>",
+    ]
+    if not unmatched_suppliers:
+        missing.append("<div class='empty'>所有分单的供应商名称均在供应商表中找到。</div>")
+    else:
+        missing.append("<table><thead><tr><th>订单号</th><th>分单供应商名称</th></tr></thead><tbody>")
+        for order in unmatched_suppliers:
+            missing.append(f"<tr><td>{order['orderNo']}</td><td>{order['supplier']}</td></tr>")
+        missing.append("</tbody></table>")
+    missing.append("</body></html>")
+    (out_dir / "unmatched-suppliers.html").write_text("\n".join(missing), encoding="utf-8")
     return written
 
 
@@ -446,6 +537,12 @@ def main():
         default=Path("/tmp/clipserve"),
         help="paste/codes html 输出目录",
     )
+    ap.add_argument(
+        "--suppliers",
+        type=Path,
+        default=Path("/Users/tangjianhong/脚本/kingdee/引出列表_供应商_20261102110005.xlsx"),
+        help="金蝶供应商导出表（需包含「供应商名称」列）",
+    )
     ap.add_argument("--from", dest="from_order", default=None, help="从该订单号起写入队列（含）")
     ap.add_argument("--port", type=int, default=8766, help="--serve 时端口")
     ap.add_argument("--serve", action="store_true", help="生成后启动本地 http 服务")
@@ -457,6 +554,11 @@ def main():
 
     rows = read_excel(args.excel)
     all_orders = split_orders(rows)
+    if not args.suppliers.exists():
+        raise SystemExit(f"找不到供应商导出表: {args.suppliers}（可通过 --suppliers 指定路径）")
+    supplier_names = read_supplier_names(args.suppliers)
+    unmatched_suppliers = find_unmatched_suppliers(all_orders, supplier_names)
+    print(f"供应商核对：{len(all_orders) - len(unmatched_suppliers)}/{len(all_orders)} 单匹配，{len(unmatched_suppliers)} 单未匹配 → {args.out_dir / 'unmatched-suppliers.html'}")
     args.manifest.parent.mkdir(parents=True, exist_ok=True)
     args.manifest.write_text(
         json.dumps(all_orders, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -473,7 +575,7 @@ def main():
                 if o["orderNo"] == args.from_order:
                     index_base = i
                     break
-        write_clip_pages(queue, args.out_dir, index_base=index_base)
+        write_clip_pages(queue, args.out_dir, index_base=index_base, unmatched_suppliers=unmatched_suppliers)
         print(f"复制页 {len(queue)*2} 个 + index.html → {args.out_dir}")
 
     # 队列里保留 clip 链接（若生成了）
