@@ -16,12 +16,15 @@ Excel 列约定（表头名）：
 from __future__ import annotations
 
 import argparse
+import difflib
+import html
 import json
 import re
 import sys
 import urllib.parse
 import zipfile
 import xml.etree.ElementTree as ET
+import unicodedata
 from datetime import date, datetime
 from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 from pathlib import Path
@@ -212,8 +215,68 @@ def read_supplier_names(path: Path):
 
 
 def find_unmatched_suppliers(orders, supplier_names):
-    """在分单完成后，按分单名称精确核对供应商表。"""
-    return [order for order in orders if str(order.get("supplier") or "").strip() not in supplier_names]
+    """分单后规范化名称，并把可信相似匹配直接写回订单分组。"""
+    def normalize(value):
+        value = unicodedata.normalize("NFKC", str(value or "")).casefold()
+        return "".join(char for char in value if char.isalnum())
+
+    exact_by_normalized = {}
+    for name in supplier_names:
+        exact_by_normalized.setdefault(normalize(name), []).append(name)
+
+    results = []
+    for order in orders:
+        supplier = str(order.get("supplier") or "").strip()
+        previous_match = order.get("supplierMatch")
+        if isinstance(previous_match, dict) and previous_match.get("source"):
+            source_supplier = str(previous_match["source"]).strip()
+            results.append({
+                "orderNo": order.get("orderNo", ""),
+                "supplier": source_supplier,
+                "status": previous_match.get("method", "manual"),
+                "matchedName": previous_match.get("matchedName", ""),
+                "topScore": previous_match.get("similarity", 0.0),
+                "candidates": [],
+            })
+            continue
+        if supplier in supplier_names:
+            continue
+        normalized = normalize(supplier)
+        normalized_matches = exact_by_normalized.get(normalized, [])
+        candidates = sorted(
+            ((difflib.SequenceMatcher(None, normalized, normalize(name)).ratio(), name)
+             for name in supplier_names if normalize(name)),
+            reverse=True,
+        )[:5]
+        top_score, top_name = candidates[0] if candidates else (0.0, "")
+        second_score = candidates[1][0] if len(candidates) > 1 else 0.0
+        # 业务别名：嘉立创在原始订单中常以个人/店铺名称出现，统一映射到金蝶主体。
+        jlc_matches = [name for name in supplier_names if "嘉立创" in name and "深圳" in name]
+        if "嘉立创" in supplier and len(jlc_matches) == 1:
+            status, matched_name = "alias-auto", jlc_matches[0]
+        elif len(normalized_matches) == 1:
+            status, matched_name = "normalized", normalized_matches[0]
+        elif top_score > 0.80:
+            status, matched_name = "fuzzy-auto", top_name
+        else:
+            status, matched_name = "manual", ""
+        if matched_name:
+            order["supplier"] = matched_name
+            order["supplierMatch"] = {
+                "source": supplier,
+                "matchedName": matched_name,
+                "method": status,
+                "similarity": 1.0 if status in ("normalized", "alias-auto") else top_score,
+            }
+        results.append({
+            "orderNo": order.get("orderNo", ""),
+            "supplier": supplier,
+            "status": status,
+            "matchedName": matched_name,
+            "topScore": top_score,
+            "candidates": candidates,
+        })
+    return results
 
 
 def split_orders(rows):
@@ -418,19 +481,36 @@ def write_clip_pages(orders, out_dir: Path, index_base: int = 0, unmatched_suppl
     (out_dir / "empty-codes.html").write_text("\n".join(empty_codes), encoding="utf-8")
 
     unmatched_suppliers = unmatched_suppliers or []
+    fuzzy_auto = [item for item in unmatched_suppliers if item["status"] != "manual"]
+    manual_suppliers = [item for item in unmatched_suppliers if item["status"] == "manual"]
     missing = [
         "<!DOCTYPE html><html><head><meta charset='utf-8'><title>供应商未匹配</title>",
-        "<style>body{font-family:Arial,sans-serif;margin:24px;color:#222}a{color:#1677ff}h1{margin-bottom:8px}.hint{color:#666;margin:0 0 20px}table{border-collapse:collapse;width:100%;margin:16px 0}th,td{border:1px solid #ddd;padding:9px 12px;text-align:left}th{background:#fff3e0}.empty{padding:12px;color:#388e3c;background:#f1f8e9}</style></head><body>",
+        "<style>body{font-family:Arial,sans-serif;margin:24px;color:#222}a{color:#1677ff}h1{margin-bottom:8px}.hint{color:#666;margin:0 0 20px}table{border-collapse:collapse;width:100%;margin:16px 0}th,td{border:1px solid #ddd;padding:9px 12px;text-align:left}th{background:#fff3e0}.empty{padding:12px;color:#388e3c;background:#f1f8e9}.auto{color:#237804}.manual{color:#ad4e00}.num{text-align:right;font-variant-numeric:tabular-nums}</style></head><body>",
         "<p><a href='index.html'>← 返回录单复制页</a></p><h1>供应商未匹配</h1>",
-        f"<p class='hint'>分单完成后按供应商名称与供应商导出表精确匹配；共发现 {len(unmatched_suppliers)} 张未匹配订单。</p>",
+        f"<p class='hint'>分单后先规范化匹配；嘉立创按业务规则映射到深圳嘉立创科技集团股份有限公司，其他名称最高相似度超过 80% 时直接更新分单与队列名称。自动匹配 {len(fuzzy_auto)} 单，待人工确认 {len(manual_suppliers)} 单。</p>",
     ]
     if not unmatched_suppliers:
         missing.append("<div class='empty'>所有分单的供应商名称均在供应商表中找到。</div>")
     else:
-        missing.append("<table><thead><tr><th>订单号</th><th>分单供应商名称</th></tr></thead><tbody>")
-        for order in unmatched_suppliers:
-            missing.append(f"<tr><td>{order['orderNo']}</td><td>{order['supplier']}</td></tr>")
-        missing.append("</tbody></table>")
+        def append_supplier_table(title, items, automatic):
+            missing.append(f"<h2>{title}（{len(items)} 单）</h2>")
+            if not items:
+                missing.append("<div class='empty'>没有记录。</div>")
+                return
+            missing.append("<table><thead><tr><th>订单号</th><th>原供应商名称</th><th>当前分单/队列名称</th><th>匹配方式</th><th>相似度</th><th>其他候选（前5）</th></tr></thead><tbody>")
+            for item in items:
+                suggestions = "<br>".join(f"{html.escape(name)}（{score:.1%}）" for score, name in item["candidates"])
+                matched = html.escape(item["matchedName"]) if automatic else "请人工确认"
+                score = "100.0%（规范化/别名）" if item["status"] in ("normalized", "alias-auto") else f"{item['topScore']:.1%}"
+                method = {"normalized": "格式规范化", "alias-auto": "业务别名", "fuzzy-auto": "相似度自动匹配"}.get(item["status"], "待人工确认")
+                cls = "auto" if automatic else "manual"
+                missing.append(
+                    f"<tr><td>{html.escape(str(item['orderNo']))}</td><td>{html.escape(item['supplier'])}</td>"
+                    f"<td class='{cls}'>{matched}</td><td>{method}</td><td class='num'>{score}</td><td>{suggestions}</td></tr>"
+                )
+            missing.append("</tbody></table>")
+        append_supplier_table("可自动匹配（建议）", fuzzy_auto, True)
+        append_supplier_table("待人工确认", manual_suppliers, False)
     missing.append("</body></html>")
     (out_dir / "unmatched-suppliers.html").write_text("\n".join(missing), encoding="utf-8")
     return written
@@ -558,7 +638,9 @@ def main():
         raise SystemExit(f"找不到供应商导出表: {args.suppliers}（可通过 --suppliers 指定路径）")
     supplier_names = read_supplier_names(args.suppliers)
     unmatched_suppliers = find_unmatched_suppliers(all_orders, supplier_names)
-    print(f"供应商核对：{len(all_orders) - len(unmatched_suppliers)}/{len(all_orders)} 单匹配，{len(unmatched_suppliers)} 单未匹配 → {args.out_dir / 'unmatched-suppliers.html'}")
+    auto_supplier_matches = sum(item["status"] != "manual" for item in unmatched_suppliers)
+    manual_supplier_matches = sum(item["status"] == "manual" for item in unmatched_suppliers)
+    print(f"供应商核对：{len(all_orders) - manual_supplier_matches}/{len(all_orders)} 单匹配（含自动更新），自动匹配 {auto_supplier_matches} 单，{manual_supplier_matches} 单待人工确认 → {args.out_dir / 'unmatched-suppliers.html'}")
     args.manifest.parent.mkdir(parents=True, exist_ok=True)
     args.manifest.write_text(
         json.dumps(all_orders, ensure_ascii=False, indent=2), encoding="utf-8"

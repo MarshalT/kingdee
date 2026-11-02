@@ -916,24 +916,29 @@
         if (action === 'check-amount') return checkDealAmount();
         if (action === 'clear') return clearData();
         if (action === 'refresh') return detectRows();
-        if (action === 'new-order') return clickKingdeeAction(['新增', '新建']);
+        if (action === 'new-order') return clickKingdeeAction('new');
         if (action === 'audit') {
             const amount = checkDealAmount();
             if (!amount || amount.consistent !== true) throw new Error(`金额未核对一致，已阻止审核（预期 ${amount?.expected ?? '—'}，页面 ${amount?.deal ?? '—'}，差额 ${amount?.difference ?? '—'}）`);
-            return clickKingdeeAction(['审核']);
+            return clickKingdeeAction('audit');
         }
         throw new Error(`未知接口动作：${action}`);
     }
 
-    function clickKingdeeAction(labels) {
-        const labelSet = new Set(labels);
-        const candidates = [...document.querySelectorAll('button,[role=button],a')]
-            .filter(el => el.getClientRects().length && labelSet.has((el.innerText || el.textContent || '').replace(/\s+/g, '').trim()));
-        if (candidates.length !== 1) throw new Error(`页面上${candidates.length ? '存在多个' : `未找到“${labels.join('”或“')}”`}按钮；未执行操作`);
-        const label = (candidates[0].innerText || candidates[0].textContent || '').replace(/\s+/g, '').trim();
+    function clickKingdeeAction(actionKey) {
+        const config = {
+            new: { label: '新增', selector: '[data-opk="new"]' },
+            audit: { label: '审核', selector: '[data-opk="audit"]' }
+        }[actionKey];
+        if (!config) throw new Error('不支持的金蝶工具栏动作：' + actionKey);
+        // 金蝶工具栏项是带 data-opk 的 div，不是 button；同一动作可能有隐藏副本。
+        const candidates = [...document.querySelectorAll(config.selector)].filter(el =>
+            el.getClientRects().length && getComputedStyle(el).visibility !== 'hidden' && getComputedStyle(el).display !== 'none'
+        );
+        if (candidates.length !== 1) throw new Error('金蝶“' + config.label + '”工具栏项' + (candidates.length ? '有多个可见节点' : '当前不可见或不存在') + '；未执行操作');
         candidates[0].click();
-        log(`已点击金蝶“${label}”按钮；如页面弹出确认窗口，请在金蝶页面完成确认。`, 'info');
-        return { clicked: true, action: label };
+        log('已点击金蝶“' + config.label + '”；如页面弹出确认窗口，请在金蝶页面完成确认。', 'info');
+        return { clicked: true, action: config.label, selector: config.selector };
     }
 
     let commandPollInFlight = false;
