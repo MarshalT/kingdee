@@ -2676,45 +2676,60 @@
         }
 
         try {
-            customerInput.click();
-            customerInput.focus();
-            const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
-                window.HTMLInputElement.prototype,
-                'value'
-            ).set;
-            nativeInputValueSetter.call(customerInput, customerInputValue);
-            customerInput.dispatchEvent(new Event('input', { bubbles: true }));
-            customerInput.dispatchEvent(new Event('change', { bubbles: true }));
-            // 与供应商选择器相同：先让基础资料控件完成搜索，再点选精确候选项。
-            await new Promise(resolve => setTimeout(resolve, 400));
-            // 与 applyQueueSupplier 完全一致：从可见候选元素中找名称文本精确匹配项，直接点击该元素。
-            const options = [...document.querySelectorAll('.basedata-lookup-list li [title], [role="option"], li, .ant-select-item, [class*="option"], [class*="Option"]')]
-                .filter(el => isElementVisible(el) && (el.getAttribute('title') || (el.textContent || '')).replace(/\s+/g, ' ').trim() === customerInputValue);
-            const matched = options.length === 1 ? options[0] : null;
-            if (!matched) {
-                log(`❌ 客户下拉列表精确匹配项数量为 ${options.length}：${customerInputValue}`, 'error');
-                return false;
+            const customerControl = customerInput.closest('[data-id="customerid"]');
+            const isCustomerBound = () => String(customerInput.value || '').trim() === customerInputValue &&
+                customerInput.getAttribute('title') === customerInputValue &&
+                !!customerControl?.querySelector('.kdfont-chakanjichuziliao');
+            if (isCustomerBound()) {
+                log(`🏢 客户已是绑定状态：${customerInputValue}`, 'success');
+                return true;
             }
-            const rect = matched.getBoundingClientRect();
-            // Tampermonkey 的隔离世界 Window 不能用作 PointerEvent.view；省略 view 让事件使用页面默认视图。
-            const eventOptions = { bubbles: true, cancelable: true, clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2, button: 0 };
-            // 金蝶客户资料列表依赖指针/鼠标按下和抬起完成绑定；click() 单事件只会关闭列表并清空输入。
-            if (typeof PointerEvent === 'function') {
-                matched.dispatchEvent(new PointerEvent('pointerdown', { ...eventOptions, pointerId: 1, pointerType: 'mouse', isPrimary: true }));
-            }
-            matched.dispatchEvent(new MouseEvent('mousedown', eventOptions));
-            if (typeof PointerEvent === 'function') {
-                matched.dispatchEvent(new PointerEvent('pointerup', { ...eventOptions, pointerId: 1, pointerType: 'mouse', isPrimary: true }));
-            }
-            matched.dispatchEvent(new MouseEvent('mouseup', eventOptions));
-            matched.dispatchEvent(new MouseEvent('click', eventOptions));
-            const selected = await waitForCondition(() => String(customerInput.value || '').trim() === customerInputValue, 2000, 100);
-            if (!selected) {
-                log(`❌ 客户候选项已点击，但控件未保留名称：${customerInputValue}（当前值：${String(customerInput.value || '').trim() || '空'}）`, 'error');
-                return false;
-            }
-            log(`🏢 客户已设置为 ${customerInputValue}`, 'success');
-            return true;
+
+            for (let attempt = 1; attempt <= 3; attempt++) {
+                customerInput.click();
+                customerInput.focus();
+                const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
+                    window.HTMLInputElement.prototype,
+                    'value'
+                ).set;
+                nativeInputValueSetter.call(customerInput, customerInputValue);
+                customerInput.dispatchEvent(new Event('input', { bubbles: true }));
+                customerInput.dispatchEvent(new Event('change', { bubbles: true }));
+                // 候选搜索是异步的；轮询最多 3 秒，避免固定延时遇到慢响应时误判失败。
+                let matched = null;
+                await waitForCondition(() => {
+                    // 按候选名称精确匹配，等待金蝶异步搜索完成。
+                    const options = [...document.querySelectorAll('.basedata-lookup-list li [title], [role="option"], li, .ant-select-item, [class*="option"], [class*="Option"]')]
+                        .filter(el => isElementVisible(el) && (el.getAttribute('title') || (el.textContent || '')).replace(/\s+/g, ' ').trim() === customerInputValue);
+                    matched = options.length === 1 ? options[0] : null;
+                    return !!matched;
+                }, 3000, 100);
+                if (!matched) {
+                    log(`⚠️ 第 ${attempt}/3 次未等到唯一客户候选：${customerInputValue}`, 'warn');
+                    continue;
+                }
+                const rect = matched.getBoundingClientRect();
+                // Tampermonkey 的隔离世界 Window 不能用作 PointerEvent.view；省略 view 让事件使用页面默认视图。
+                const eventOptions = { bubbles: true, cancelable: true, clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2, button: 0 };
+                // 金蝶客户资料列表依赖指针/鼠标按下和抬起完成绑定；click() 单事件只会关闭列表并清空输入。
+                if (typeof PointerEvent === 'function') {
+                    matched.dispatchEvent(new PointerEvent('pointerdown', { ...eventOptions, pointerId: 1, pointerType: 'mouse', isPrimary: true }));
+                }
+                matched.dispatchEvent(new MouseEvent('mousedown', eventOptions));
+                if (typeof PointerEvent === 'function') {
+                    matched.dispatchEvent(new PointerEvent('pointerup', { ...eventOptions, pointerId: 1, pointerType: 'mouse', isPrimary: true }));
+                }
+                matched.dispatchEvent(new MouseEvent('mouseup', eventOptions));
+                matched.dispatchEvent(new MouseEvent('click', eventOptions));
+                const selected = await waitForCondition(isCustomerBound, 2500, 100);
+                if (selected) {
+                    log(`🏢 客户已设置并确认绑定：${customerInputValue}`, 'success');
+                    return true;
+                }
+                log(`⚠️ 第 ${attempt}/3 次点选后未确认客户绑定，当前输入值：${String(customerInput.value || '').trim() || '空'}`, 'warn');
+                }
+            log(`❌ 重试 3 次后仍未能绑定客户：${customerInputValue}`, 'error');
+            return false;
         } catch (error) {
             log(`❌ 客户填充失败：${error.message}`, 'error');
             return false;
